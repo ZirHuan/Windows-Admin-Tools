@@ -1,0 +1,14 @@
+# Private configuration files - NEVER commit
+customers.json
+*.local.json
+
+# Output reports
+*.html
+Report-*.html
+LicensedUsers-*.html
+*.csv
+
+# Temporary and cache files
+*.tmp
+.DS_Store
+Thumbs.db
