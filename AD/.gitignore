@@ -1,0 +1,35 @@
+# PowerShell
+*.ps1~
+*.psm1~
+
+# Logs
+*.log
+
+# Sensitive data
+*.csv
+*.xlsx
+*.txt
+credentials.json
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE files
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Package files
+*.zip
+*.7z
+*.tar.gz
