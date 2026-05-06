@@ -838,6 +838,7 @@ $html = @"
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>$EffectiveTenantName — M365 Customer Report</title>
 <style>
@@ -943,6 +944,11 @@ function sort(tId,col){
 </script>
 </head>
 <body>
+<!--[if lt IE 11]>
+<div style="background:#e81123;color:white;padding:10px 24px;font-family:sans-serif;font-size:13px">
+  This report requires a modern browser (Edge, Chrome, or Firefox). Internet Explorer is not supported.
+</div>
+<![endif]-->
 <header>
   <h1>$EffectiveTenantName &mdash; M365 Customer Report</h1>
   <p>Generated $reportDate &nbsp;&bull;&nbsp; Findings: <strong>$highCount HIGH</strong> &nbsp;&bull;&nbsp; $medCount MEDIUM &nbsp;&bull;&nbsp; $lowCount LOW$mfaNote</p>
