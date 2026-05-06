@@ -19,19 +19,19 @@ Output is a single HTML report with charts, tables, and key metrics.
 **Usage:**
 ```powershell
 # Using a customer profile (single-tenant customers.json)
-.\Get-CustomerReport.ps1 -CustomersFile ".\naturskog.se\customers.json"
+.\Get-CustomerReport.ps1 -CustomersFile ".\Customer.se\contoso.com.json"
 
 # Using a named customer profile
-.\Get-CustomerReport.ps1 -Customer antilopgroup
+.\Get-CustomerReport.ps1 -Customer contoso.com
 
 # Using ad-hoc credentials
 .\Get-CustomerReport.ps1 -TenantId "contoso.com" -AdminUPN "admin@contoso.com" -TenantName "Contoso Inc"
 
 # Skip Exchange Online connection (faster if not needed)
-.\Get-CustomerReport.ps1 -Customer antilopgroup -SkipExchangeOnline
+.\Get-CustomerReport.ps1 -Customer contoso.com -SkipExchangeOnline
 
 # Custom output path and inactive threshold
-.\Get-CustomerReport.ps1 -Customer customer1 -OutputPath "C:\Reports" -InactiveThresholdDays 120
+.\Get-CustomerReport.ps1 -Customer contoso.com -OutputPath "C:\Reports" -InactiveThresholdDays 120
 ```
 
 ### Get-TenantOverview.ps1
