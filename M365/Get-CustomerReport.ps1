@@ -220,6 +220,7 @@ $primaryDomain = ($org.VerifiedDomains | Where-Object IsDefault).Name
 
 Write-Host "[INFO] Collecting domains..." -ForegroundColor Cyan
 $domains = Get-MgDomain | Select-Object Id, IsDefault, IsVerified, AuthenticationType
+$tenantDomainNames = @($domains | Where-Object IsVerified | Select-Object -ExpandProperty Id)
 
 Write-Host "[INFO] Collecting license SKUs..." -ForegroundColor Cyan
 $skus = Get-MgSubscribedSku -All
@@ -267,7 +268,7 @@ foreach ($role in $roles) {
                 Role              = $role.DisplayName
                 DisplayName       = $u.DisplayName
                 UserPrincipalName = $u.UserPrincipalName
-                IsExternal        = ($u.UserPrincipalName -notmatch "@$([regex]::Escape($primaryDomain))$")
+                IsExternal        = -not ($tenantDomainNames | Where-Object { $u.UserPrincipalName -match "@$([regex]::Escape($_))$" })
             }
         }
     }
@@ -434,7 +435,7 @@ if ($externalGAs) {
     $findings.Add([PSCustomObject]@{
         Severity = "HIGH"
         Title    = "External Global Administrator account(s) detected"
-        Detail   = "Account(s) with Global Admin role whose domain is not $primaryDomain`: $names"
+        Detail   = "Account(s) with Global Admin role whose UPN domain is not a verified tenant domain: $names"
         Action   = "Remove these accounts if they belong to a previous IT provider."
     })
 }
