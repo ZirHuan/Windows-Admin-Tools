@@ -45,6 +45,9 @@
               - Source folder renamed from source\ to <shortname>.source\
               - HTML report filename prefixed with shortname
               - customers.json snapshot saved into source folder after each run
+        1.3.1 - Auto-select now shows customer details and asks confirmation before proceeding
+              - Session check moved to single summary block after module load; warns on tenant mismatch
+              - Graph/EXO connect sections simplified — no duplicate session prompts
 #>
 
 [CmdletBinding()]
@@ -86,7 +89,15 @@ if (Test-Path $CustomersFile) {
         }
     } elseif ($profileList.Count -eq 1) {
         $profileData = $profileList[0]
-        Write-Host "[INFO] Auto-selected: $($profileData.DisplayName)" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "[INFO] Auto-selected customer: $($profileData.DisplayName) [$($profileData.ShortName)]" -ForegroundColor Cyan
+        Write-Host "       TenantId : $($profileData.TenantId)" -ForegroundColor Cyan
+        Write-Host "       Domain   : $($profileData.PrimaryDomain)" -ForegroundColor Cyan
+        $yn = Read-Host "  Continue with this customer? (Y/N)"
+        if ($yn -notmatch "^[Yy]$") {
+            $available = ($profileList.ShortName) -join ', '
+            throw "Cancelled. Re-run with -Customer <name> to specify. Available: $available"
+        }
     } elseif (-not $TenantId) {
         $available = ($profileList.ShortName) -join ', '
         throw "Multiple customers in $CustomersFile — specify -Customer. Available: $available"
@@ -169,6 +180,34 @@ foreach ($mod in $requiredModules) {
     }
 }
 
+# ── SESSION CHECK ─────────────────────────────────────────────────────────────
+Write-Host "`n[INFO] Checking existing sessions..." -ForegroundColor Cyan
+$graphContext = Get-MgContext -ErrorAction SilentlyContinue
+$exoConnInfo  = Get-ConnectionInformation -ErrorAction SilentlyContinue | Select-Object -First 1
+
+$graphStatus = if ($graphContext) {
+    $tenantMatch = -not $EffectiveTenantId -or ($graphContext.TenantId -eq $EffectiveTenantId)
+    $mismatch    = if (-not $tenantMatch) { "  *** DIFFERENT TENANT THAN SELECTED PROFILE ***" } else { "" }
+    "  Graph : $($graphContext.Account)  |  Tenant: $($graphContext.TenantId)$mismatch"
+} else { "  Graph : Not connected" }
+
+$exoStatus = if ($exoConnInfo.UserPrincipalName) {
+    "  EXO   : $($exoConnInfo.UserPrincipalName)"
+} else { "  EXO   : Not connected" }
+
+Write-Host $graphStatus -ForegroundColor $(if ($graphContext -and ($EffectiveTenantId -and $graphContext.TenantId -ne $EffectiveTenantId)) { 'Yellow' } else { 'Cyan' })
+Write-Host $exoStatus   -ForegroundColor $(if ($exoConnInfo) { 'Cyan' } else { 'Gray' })
+
+if ($graphContext -or $exoConnInfo) {
+    $yn = Read-Host "`n  Disconnect existing session(s) before continuing? (Y/N)"
+    if ($yn -match "^[Yy]$") {
+        if ($graphContext)  { Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null; $graphContext = $null }
+        if ($exoConnInfo)   { Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue }
+        Write-Host "  Sessions disconnected." -ForegroundColor Yellow
+    }
+}
+Write-Host ""
+
 # ── GRAPH CONNECTION ──────────────────────────────────────────────────────────
 $requiredScopes = @(
     "User.Read.All",
@@ -180,18 +219,8 @@ $requiredScopes = @(
     "DeviceManagementManagedDevices.Read.All"
 )
 
-$graphContext = Get-MgContext
-if ($graphContext) {
-    Write-Host "[INFO] Already connected to Microsoft Graph as: $($graphContext.Account)  |  Tenant: $($graphContext.TenantId)" -ForegroundColor Cyan
-    $yn = Read-Host "  Disconnect and reconnect with a different account or tenant? (Y/N)"
-    if ($yn -match "^[Yy]$") {
-        Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
-        $graphContext = $null
-        Write-Host "  Disconnected from Microsoft Graph." -ForegroundColor Yellow
-    }
-}
 if (-not $graphContext) {
-    Write-Host "`n[INFO] Not connected to Microsoft Graph." -ForegroundColor Yellow
+    Write-Host "[INFO] Not connected to Microsoft Graph." -ForegroundColor Yellow
     $yn = Read-Host "  Connect now? (Y/N)"
     if ($yn -match "^[Yy]$") {
         if (-not $EffectiveTenantId) { $EffectiveTenantId = Read-Host "  Enter Tenant ID or domain" }
@@ -204,26 +233,19 @@ if (-not $graphContext) {
         }
         Write-Host "  Connected." -ForegroundColor Green
     } else { throw "Microsoft Graph connection required." }
+} else {
+    Write-Host "[INFO] Using existing Graph session: $($graphContext.Account)" -ForegroundColor Green
 }
 
 # ── EXO CONNECTION ────────────────────────────────────────────────────────────
 $exoConnected = $false
 if (-not $SkipExchangeOnline) {
-    try {
-        $null = Get-EXOMailbox -ResultSize 1 -ErrorAction Stop
+    $exoConnInfo = Get-ConnectionInformation -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($exoConnInfo) {
         $exoConnected = $true
-        $exoConnInfo = Get-ConnectionInformation -ErrorAction SilentlyContinue | Select-Object -First 1
-        $exoWho = if ($exoConnInfo.UserPrincipalName) { $exoConnInfo.UserPrincipalName } else { "unknown account" }
-        Write-Host "[INFO] Already connected to Exchange Online as: $exoWho" -ForegroundColor Cyan
-        $yn = Read-Host "  Disconnect and reconnect with a different account? (Y/N)"
-        if ($yn -match "^[Yy]$") {
-            Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
-            $exoConnected = $false
-            Write-Host "  Disconnected from Exchange Online." -ForegroundColor Yellow
-        }
-    } catch {}
-    if (-not $exoConnected) {
-        Write-Host "`n[INFO] Not connected to Exchange Online." -ForegroundColor Yellow
+        Write-Host "[INFO] Using existing EXO session: $($exoConnInfo.UserPrincipalName)" -ForegroundColor Green
+    } else {
+        Write-Host "[INFO] Not connected to Exchange Online." -ForegroundColor Yellow
         $yn = Read-Host "  Connect now? (Y/N)"
         if ($yn -match "^[Yy]$") {
             try {
