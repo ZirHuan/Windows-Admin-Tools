@@ -30,7 +30,7 @@
     .\Get-CustomerReport.ps1 -TenantId "contoso.com" -AdminUPN "admin@contoso.com" -TenantName "Contoso"
 .NOTES
     Authors:  Rosvall & Claude
-    Version:  1.3.2
+    Version:  1.3.3
     Changelog:
         1.0.0 - Initial release
         1.1.0 - Fix IsExternal to check all verified tenant domains (not only primary)
@@ -53,6 +53,11 @@
               - Remove all Disconnect-ExchangeOnline calls — crashes process in EXO 3.9.x
                 (MSAL WAM broker NullReferenceException in ClearAllTokensAsync background thread)
               - EXO REST sessions now expire automatically; only Graph is explicitly disconnected
+        1.3.3 - First run of a new tenant: after Graph connects, show tenant info and ask for
+                a short name upfront — used for both the output folder and customers.json entry
+              - Ask whether to save to customers.json at the start, not at the end
+              - Output path prompt for new tenants deferred until after tenant is identified
+              - Org data fetched once and reused (no duplicate API call)
 #>
 
 [CmdletBinding()]
@@ -115,9 +120,13 @@ if (Test-Path $CustomersFile) {
 $EffectiveTenantId   = if ($TenantId)   { $TenantId }   elseif ($profileData.TenantId)    { $profileData.TenantId }    else { $null }
 $EffectiveAdminUPN   = if ($AdminUPN)   { $AdminUPN }   elseif ($profileData.AdminUPN)    { $profileData.AdminUPN }    else { $null }
 $EffectiveTenantName = if ($TenantName) { $TenantName } elseif ($profileData.DisplayName) { $profileData.DisplayName } else { "M365 Tenant" }
-$shortName           = if ($profileData.ShortName) { $profileData.ShortName } else { $EffectiveTenantName -replace '[^a-zA-Z0-9]','' }
+$shortName           = if ($profileData.ShortName) { $profileData.ShortName } else { $null }
+$isNewTenant         = -not $profileData
+$saveNewToJson       = $false
 
-if (-not $OutputPath) {
+# For known profiles, resolve the output path now (shortName is known)
+# For new tenants, we wait until after Graph connects so we know who we're talking to
+if (-not $isNewTenant -and -not $OutputPath) {
     $defaultPath = Join-Path $PSScriptRoot $shortName
     if ($UseDefaultOutputPath) {
         $OutputPath = $defaultPath
@@ -246,6 +255,40 @@ if (-not $graphContext) {
     Write-Host "[INFO] Using existing Graph session: $($graphContext.Account)" -ForegroundColor Green
 }
 
+# ── NEW TENANT IDENTIFICATION ─────────────────────────────────────────────────
+# Runs only when no customers.json profile was loaded.
+# We now know who we connected to — ask for a short name and whether to save to JSON.
+if ($isNewTenant) {
+    Write-Host "`n[INFO] No customer profile loaded — identifying tenant..." -ForegroundColor Cyan
+    $orgEarly           = Get-MgOrganization
+    $primaryDomainEarly = ($orgEarly.VerifiedDomains | Where-Object IsDefault).Name
+    Write-Host "  Tenant name : $($orgEarly.DisplayName)" -ForegroundColor White
+    Write-Host "  Domain      : $primaryDomainEarly" -ForegroundColor White
+    Write-Host "  Tenant ID   : $($orgEarly.Id)" -ForegroundColor White
+    Write-Host "  Created     : $(if ($orgEarly.CreatedDateTime) { ([datetime]$orgEarly.CreatedDateTime).ToString('yyyy-MM-dd') })" -ForegroundColor White
+
+    if (-not $TenantName) { $EffectiveTenantName = $orgEarly.DisplayName }
+
+    do {
+        $shortNameInput = (Read-Host "`n  Enter a short name for this customer (e.g. 'caver')").Trim()
+    } while (-not $shortNameInput)
+    $shortName = $shortNameInput -replace '[^a-zA-Z0-9_-]', ''
+
+    $yn = Read-Host "  Save this customer to customers.json? (Y/N)"
+    $saveNewToJson = $yn -match "^[Yy]$"
+
+    if (-not $OutputPath) {
+        $defaultPath = Join-Path $PSScriptRoot $shortName
+        if ($UseDefaultOutputPath) {
+            $OutputPath = $defaultPath
+        } else {
+            Write-Host "  [INFO] Default output folder: $defaultPath" -ForegroundColor Cyan
+            $customPath = Read-Host "  Press Enter to use default, or type a new path"
+            $OutputPath = if ($customPath.Trim()) { $customPath.Trim() } else { $defaultPath }
+        }
+    }
+}
+
 # ── EXO CONNECTION ────────────────────────────────────────────────────────────
 $exoConnected = $false
 if (-not $SkipExchangeOnline) {
@@ -290,8 +333,13 @@ try {
 # ── DATA COLLECTION ───────────────────────────────────────────────────────────
 
 Write-Host "[INFO] Collecting tenant information..." -ForegroundColor Cyan
-$org           = Get-MgOrganization
-$primaryDomain = ($org.VerifiedDomains | Where-Object IsDefault).Name
+if ($isNewTenant) {
+    $org           = $orgEarly
+    $primaryDomain = $primaryDomainEarly
+} else {
+    $org           = Get-MgOrganization
+    $primaryDomain = ($org.VerifiedDomains | Where-Object IsDefault).Name
+}
 
 Write-Host "[INFO] Collecting domains..." -ForegroundColor Cyan
 $domains = Get-MgDomain | Select-Object Id, IsDefault, IsVerified, AuthenticationType
@@ -1131,7 +1179,7 @@ function sort(tId,col){
 </div>
 
 </main>
-<footer>Get-CustomerReport.ps1 v1.3.2 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\</footer>
+<footer>Get-CustomerReport.ps1 v1.3.3 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\</footer>
 </body>
 </html>
 "@
@@ -1193,13 +1241,8 @@ if ($profileData -and (Test-Path $CustomersFile)) {
         $doUpdate = $yn -match "^[Yy]$"
     }
 } elseif (-not $profileData) {
-    if ($UpdateCustomerProfile) {
-        $doCreate = $true
-    } else {
-        Write-Host ""
-        $yn = Read-Host "[PROMPT] No customers.json profile loaded. Create a new entry for this tenant? (Y/N)"
-        $doCreate = $yn -match "^[Yy]$"
-    }
+    # User was already asked at startup (saveNewToJson); -UpdateCustomerProfile overrides
+    $doCreate = $saveNewToJson -or $UpdateCustomerProfile
 }
 
 if ($doUpdate -and (Test-Path $CustomersFile)) {
@@ -1219,32 +1262,28 @@ if ($doUpdate -and (Test-Path $CustomersFile)) {
 
 if ($doCreate) {
     try {
-        $newShortName = Read-Host "  Enter a short name for this customer (e.g. 'contoso')"
-        if ($newShortName.Trim()) {
-            $newEntry = [PSCustomObject]@{
-                ShortName            = $newShortName.Trim()
-                DisplayName          = $org.DisplayName
-                TenantId             = $org.Id
-                AdminUPN             = $suggestedAdminUPN
-                PrimaryDomain        = $primaryDomain
-                AllDomains           = @($tenantDomainNames)
-                Country              = $org.CountryLetterCode
-                TechNotificationMail = $techMail
-                TenantCreated        = if ($org.CreatedDateTime) { ([datetime]$org.CreatedDateTime).ToString('yyyy-MM-dd') } else { "" }
-                PrimaryLicenseSku    = $primaryLicenseSku
-                LastReportDate       = (Get-Date -Format 'yyyy-MM-dd HH:mm')
-                LastReportPath       = $reportFile
-                Notes                = ""
-            }
-            $existingProfiles = @()
-            if (Test-Path $CustomersFile) {
-                $existingProfiles = @(Get-Content $CustomersFile -Raw | ConvertFrom-Json)
-            }
-            ($existingProfiles + $newEntry) | ConvertTo-Json -Depth 10 | Set-Content $CustomersFile -Encoding UTF8
-            Write-Host "[INFO] New customer profile '$($newShortName.Trim())' added to $CustomersFile." -ForegroundColor Green
-        } else {
-            Write-Warning "No short name entered — profile not created."
+        # $shortName was collected at startup during new tenant identification
+        $newEntry = [PSCustomObject]@{
+            ShortName            = $shortName
+            DisplayName          = $org.DisplayName
+            TenantId             = $org.Id
+            AdminUPN             = $suggestedAdminUPN
+            PrimaryDomain        = $primaryDomain
+            AllDomains           = @($tenantDomainNames)
+            Country              = $org.CountryLetterCode
+            TechNotificationMail = $techMail
+            TenantCreated        = if ($org.CreatedDateTime) { ([datetime]$org.CreatedDateTime).ToString('yyyy-MM-dd') } else { "" }
+            PrimaryLicenseSku    = $primaryLicenseSku
+            LastReportDate       = (Get-Date -Format 'yyyy-MM-dd HH:mm')
+            LastReportPath       = $reportFile
+            Notes                = ""
         }
+        $existingProfiles = @()
+        if (Test-Path $CustomersFile) {
+            $existingProfiles = @(Get-Content $CustomersFile -Raw | ConvertFrom-Json)
+        }
+        ($existingProfiles + $newEntry) | ConvertTo-Json -Depth 10 | Set-Content $CustomersFile -Encoding UTF8
+        Write-Host "[INFO] New customer profile '$shortName' added to $CustomersFile." -ForegroundColor Green
     } catch {
         Write-Warning "Could not create customers.json entry — $_"
     }
