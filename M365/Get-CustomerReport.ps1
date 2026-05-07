@@ -30,7 +30,7 @@
     .\Get-CustomerReport.ps1 -TenantId "contoso.com" -AdminUPN "admin@contoso.com" -TenantName "Contoso"
 .NOTES
     Authors:  Rosvall & Claude
-    Version:  1.3.5
+    Version:  1.3.6
     Changelog:
         1.0.0 - Initial release
         1.1.0 - Fix IsExternal to check all verified tenant domains (not only primary)
@@ -64,6 +64,9 @@
         1.3.5 - Fix: -TenantId now matches by ShortName, TenantId field, or PrimaryDomain in
                 customers.json — so -TenantId "AntilopGroup" loads the profile and uses its
                 real TenantId instead of passing the short name to Connect-MgGraph
+        1.3.6 - IverBranding: replace emoji section icons with official Iver branded icons
+                (base64-embedded PNGs from Ikoner\ folder next to the script); falls back to
+                emoji if Ikoner\ folder is absent
 #>
 
 [CmdletBinding()]
@@ -994,6 +997,26 @@ if ($IverBranding) {
     }
 }
 
+# Section icon variables — emoji fallbacks replaced by Iver PNGs when -IverBranding and Ikoner\ folder exists
+$siFindings = "&#128680;"; $siTenant = "&#127970;"; $siLicenses = "&#128196;"
+$siUsers    = "&#128101;"; $siAdmins  = "&#128272;"; $siGroups   = "&#128101;"
+$siCA       = "&#128274;"; $siDevices = "&#128187;"; $siExchange = "&#128231;"
+if ($IverBranding) {
+    $iconDir = Join-Path $PSScriptRoot "Ikoner"
+    $siDefs = [ordered]@{
+        siFindings = 'warning.png'; siTenant = 'globe.png';    siLicenses = 'box.png'
+        siUsers    = 'user.png';    siAdmins = 'key.png';      siGroups   = 'group.png'
+        siCA       = 'shield.png';  siDevices = 'laptop.png';  siExchange = 'discussion.png'
+    }
+    foreach ($entry in $siDefs.GetEnumerator()) {
+        $iconPath = Join-Path $iconDir $entry.Value
+        if (Test-Path $iconPath) {
+            $ib = [Convert]::ToBase64String([IO.File]::ReadAllBytes($iconPath))
+            Set-Variable -Name $entry.Key -Value "<img src='data:image/png;base64,$ib' class='si' alt=''>"
+        }
+    }
+}
+
 $cssBlock = if ($IverBranding) {
 @"
 <style>
@@ -1008,6 +1031,7 @@ nav a:hover{color:#FCDE06;border-bottom-color:#FCDE06}
 main{max-width:1500px;margin:0 auto;padding:24px 40px}
 .section{background:rgba(255,255,255,0.04);border-radius:4px;padding:24px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,.3);border:1px solid rgba(130,130,130,0.3)}
 .section h2{font-size:16px;font-weight:600;color:#FCDE06;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid rgba(130,130,130,0.3)}
+.si{width:18px;height:18px;vertical-align:middle;margin-right:8px;filter:invert(1);opacity:.85;position:relative;top:-1px}
 .section h3{font-size:13px;font-weight:600;color:#D2D2D2;margin:20px 0 10px}
 .stat-grid{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}
 .stat-card{background:rgba(255,255,255,0.06);border-radius:4px;padding:16px 20px;min-width:130px;flex:1;border-top:4px solid #FCDE06!important;border:1px solid rgba(130,130,130,0.3)}
@@ -1067,7 +1091,7 @@ tr:last-child td{border-bottom:none}
 .legend-item{display:flex;align-items:center;gap:6px}
 .ldot{width:12px;height:12px;border-radius:2px;flex-shrink:0}
 footer{text-align:center;padding:20px;color:#A0A0A0;font-size:12px;border-top:1px solid #505050}
-@media print{body{background:white;color:black}header{background:white;border-bottom:2px solid black}nav{display:none}.section{border:1px solid #ccc;background:white}.section h2,.stat-value,th{color:black!important}td{color:black!important}th{border-bottom:1px solid black}}
+@media print{body{background:white;color:black}header{background:white;border-bottom:2px solid black}nav{display:none}.section{border:1px solid #ccc;background:white}.section h2,.stat-value,th{color:black!important}td{color:black!important}th{border-bottom:1px solid black}.si{filter:none;opacity:.6}}
 </style>
 "@
 } else {
@@ -1166,11 +1190,11 @@ $reportHeaderHtml = if ($IverBranding) {
 
 $reportFooterHtml = if ($IverBranding) {
 @"
-<footer>${footerLogoHtml}Get-CustomerReport.ps1 v1.3.4 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\<br><small style="opacity:.6">&copy; $(Get-Date -Format 'yyyy') Iver Managed Services</small></footer>
+<footer>${footerLogoHtml}Get-CustomerReport.ps1 v1.3.6 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\<br><small style="opacity:.6">&copy; $(Get-Date -Format 'yyyy') Iver Managed Services</small></footer>
 "@
 } else {
 @"
-<footer>Get-CustomerReport.ps1 v1.3.4 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\</footer>
+<footer>Get-CustomerReport.ps1 v1.3.6 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\</footer>
 "@
 }
 
@@ -1234,12 +1258,12 @@ $reportHeaderHtml
 <main>
 
 <div class="section" id="findings">
-  <h2>&#128680; Key Findings</h2>
+  <h2>$siFindings Key Findings</h2>
   $findingsHtml
 </div>
 
 <div class="section" id="tenant">
-  <h2>&#127970; Tenant Overview</h2>
+  <h2>$siTenant Tenant Overview</h2>
   <div class="tenant-top">
     <div style="flex:1;min-width:300px">$tenantInfoHtml</div>
     $secureScoreHtml
@@ -1249,7 +1273,7 @@ $reportHeaderHtml
 </div>
 
 <div class="section" id="licenses">
-  <h2>&#128196; Subscriptions &amp; Licenses</h2>
+  <h2>$siLicenses Subscriptions &amp; Licenses</h2>
   <table id="sku-table">
     <thead><tr>
       <th onclick="sort('sku-table',0)">SKU &#8597;</th>
@@ -1266,7 +1290,7 @@ $reportHeaderHtml
 </div>
 
 <div class="section" id="users">
-  <h2>&#128101; Users</h2>
+  <h2>$siUsers Users</h2>
   $userCardsHtml
   $mfaNoteHtml
   <div class="search-bar">
@@ -1297,28 +1321,28 @@ $reportHeaderHtml
 </div>
 
 <div class="section" id="admins">
-  <h2>&#128272; Admin Role Assignments</h2>
+  <h2>$siAdmins Admin Role Assignments</h2>
   $adminHtml
 </div>
 
 <div class="section" id="groups">
-  <h2>&#128101; Groups</h2>
+  <h2>$siGroups Groups</h2>
   $groupCardsHtml
   $groupTableHtml
 </div>
 
 <div class="section" id="ca">
-  <h2>&#128274; Conditional Access Policies</h2>
+  <h2>$siCA Conditional Access Policies</h2>
   $caHtml
 </div>
 
 <div class="section" id="devices">
-  <h2>&#128187; Devices</h2>
+  <h2>$siDevices Devices</h2>
   $devicesHtml
 </div>
 
 <div class="section" id="exchange">
-  <h2>&#128231; Exchange Online</h2>
+  <h2>$siExchange Exchange Online</h2>
   $exoHtml
 </div>
 
