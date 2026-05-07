@@ -41,6 +41,10 @@
         1.2.0 - Prompt to create or update customers.json with live collected data
               - Prompt to confirm or override the output folder (UseDefaultOutputPath switch to skip)
               - Prompt to disconnect Graph and Exchange Online after completion (DisconnectAfter switch to auto)
+        1.3.0 - Check existing Graph/EXO sessions at startup, show who is connected, offer disconnect
+              - Source folder renamed from source\ to <shortname>.source\
+              - HTML report filename prefixed with shortname
+              - customers.json snapshot saved into source folder after each run
 #>
 
 [CmdletBinding()]
@@ -177,6 +181,15 @@ $requiredScopes = @(
 )
 
 $graphContext = Get-MgContext
+if ($graphContext) {
+    Write-Host "[INFO] Already connected to Microsoft Graph as: $($graphContext.Account)  |  Tenant: $($graphContext.TenantId)" -ForegroundColor Cyan
+    $yn = Read-Host "  Disconnect and reconnect with a different account or tenant? (Y/N)"
+    if ($yn -match "^[Yy]$") {
+        Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+        $graphContext = $null
+        Write-Host "  Disconnected from Microsoft Graph." -ForegroundColor Yellow
+    }
+}
 if (-not $graphContext) {
     Write-Host "`n[INFO] Not connected to Microsoft Graph." -ForegroundColor Yellow
     $yn = Read-Host "  Connect now? (Y/N)"
@@ -191,8 +204,6 @@ if (-not $graphContext) {
         }
         Write-Host "  Connected." -ForegroundColor Green
     } else { throw "Microsoft Graph connection required." }
-} else {
-    Write-Host "[INFO] Already connected as $($graphContext.Account)" -ForegroundColor Green
 }
 
 # ── EXO CONNECTION ────────────────────────────────────────────────────────────
@@ -201,8 +212,17 @@ if (-not $SkipExchangeOnline) {
     try {
         $null = Get-EXOMailbox -ResultSize 1 -ErrorAction Stop
         $exoConnected = $true
-        Write-Host "[INFO] Already connected to Exchange Online." -ForegroundColor Green
-    } catch {
+        $exoConnInfo = Get-ConnectionInformation -ErrorAction SilentlyContinue | Select-Object -First 1
+        $exoWho = if ($exoConnInfo.UserPrincipalName) { $exoConnInfo.UserPrincipalName } else { "unknown account" }
+        Write-Host "[INFO] Already connected to Exchange Online as: $exoWho" -ForegroundColor Cyan
+        $yn = Read-Host "  Disconnect and reconnect with a different account? (Y/N)"
+        if ($yn -match "^[Yy]$") {
+            Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue
+            $exoConnected = $false
+            Write-Host "  Disconnected from Exchange Online." -ForegroundColor Yellow
+        }
+    } catch {}
+    if (-not $exoConnected) {
         Write-Host "`n[INFO] Not connected to Exchange Online." -ForegroundColor Yellow
         $yn = Read-Host "  Connect now? (Y/N)"
         if ($yn -match "^[Yy]$") {
@@ -578,7 +598,7 @@ if ($org.TechnicalNotificationMails) {
 
 # ── SAVE SOURCE DATA ──────────────────────────────────────────────────────────
 $sourceTimestamp = Get-Date -Format "yyyyMMdd_HHmm"
-$sourcePath      = Join-Path $OutputPath "source\$sourceTimestamp"
+$sourcePath      = Join-Path $OutputPath "$shortName.source\$sourceTimestamp"
 if (-not (Test-Path $sourcePath)) {
     New-Item -ItemType Directory -Path $sourcePath -Force | Out-Null
 }
@@ -1080,7 +1100,7 @@ function sort(tId,col){
 </div>
 
 </main>
-<footer>Get-CustomerReport.ps1 v1.2.0 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: source\$sourceTimestamp\</footer>
+<footer>Get-CustomerReport.ps1 v1.3.0 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\</footer>
 </body>
 </html>
 "@
@@ -1089,7 +1109,7 @@ function sort(tId,col){
 if (-not (Test-Path $OutputPath)) {
     New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
 }
-$fileName   = "$($EffectiveTenantName -replace '[^a-zA-Z0-9]','-')_CustomerReport_$(Get-Date -Format 'yyyyMMdd_HHmm').html"
+$fileName   = "${shortName}_CustomerReport_$(Get-Date -Format 'yyyyMMdd_HHmm').html"
 $reportFile = Join-Path $OutputPath $fileName
 $html | Set-Content -Path $reportFile -Encoding UTF8
 
@@ -1196,6 +1216,16 @@ if ($doCreate) {
         }
     } catch {
         Write-Warning "Could not create customers.json entry — $_"
+    }
+}
+
+# Save customers.json snapshot to source folder
+if (Test-Path $CustomersFile) {
+    try {
+        Copy-Item $CustomersFile -Destination (Join-Path $sourcePath "customers.json") -Force -ErrorAction Stop
+        Write-Host "[INFO] customers.json snapshot saved to source folder." -ForegroundColor Cyan
+    } catch {
+        Write-Warning "Could not save customers.json snapshot — $_"
     }
 }
 
