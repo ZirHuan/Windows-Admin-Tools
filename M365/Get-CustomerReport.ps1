@@ -88,7 +88,7 @@ if (Test-Path $CustomersFile) {
             Write-Host "Customer '$Customer' not found in $CustomersFile. Available: $available" -ForegroundColor Yellow
             exit 0
         }
-    } elseif ($profileList.Count -eq 1) {
+    } elseif ($profileList.Count -eq 1 -and -not $TenantId) {
         $profileData = $profileList[0]
         Write-Host ""
         Write-Host "[INFO] Auto-selected customer: $($profileData.DisplayName) [$($profileData.ShortName)]" -ForegroundColor Cyan
