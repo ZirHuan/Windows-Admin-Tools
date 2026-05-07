@@ -85,7 +85,8 @@ if (Test-Path $CustomersFile) {
         $profileData = $profileList | Where-Object { $_.ShortName -ieq $Customer }
         if (-not $profileData) {
             $available = ($profileList.ShortName) -join ', '
-            throw "Customer '$Customer' not found in $CustomersFile. Available: $available"
+            Write-Host "Customer '$Customer' not found in $CustomersFile. Available: $available" -ForegroundColor Yellow
+            exit 0
         }
     } elseif ($profileList.Count -eq 1) {
         $profileData = $profileList[0]
@@ -101,7 +102,8 @@ if (Test-Path $CustomersFile) {
         }
     } elseif (-not $TenantId) {
         $available = ($profileList.ShortName) -join ', '
-        throw "Multiple customers in $CustomersFile — specify -Customer. Available: $available"
+        Write-Host "Multiple customers in $CustomersFile — specify -Customer <name>. Available: $available" -ForegroundColor Yellow
+        exit 0
     }
 }
 
