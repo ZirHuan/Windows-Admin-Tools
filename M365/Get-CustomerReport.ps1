@@ -204,8 +204,8 @@ Write-Host $exoStatus   -ForegroundColor $(if ($exoConnInfo) { 'Cyan' } else { '
 if ($graphContext -or $exoConnInfo) {
     $yn = Read-Host "`n  Disconnect existing session(s) before continuing? (Y/N)"
     if ($yn -match "^[Yy]$") {
-        if ($graphContext)  { Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null; $graphContext = $null }
-        if ($exoConnInfo)   { Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue }
+        if ($exoConnInfo)  { Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue }
+        if ($graphContext) { Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null; $graphContext = $null }
         Write-Host "  Sessions disconnected." -ForegroundColor Yellow
     }
 }
@@ -1260,14 +1260,14 @@ Start-Process $reportFile
 
 # ── DISCONNECT ─────────────────────────────────────────────────────────────────
 if ($DisconnectAfter) {
-    Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
     if ($exoConnected) { Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue }
+    Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
     Write-Host "[INFO] Disconnected from Microsoft Graph and Exchange Online." -ForegroundColor Cyan
 } else {
     $yn = Read-Host "`n[PROMPT] Disconnect from Microsoft Graph and Exchange Online? (Y/N)"
     if ($yn -match "^[Yy]$") {
-        Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
         if ($exoConnected) { Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue }
+        Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
         Write-Host "[INFO] Disconnected." -ForegroundColor Cyan
     }
 }
