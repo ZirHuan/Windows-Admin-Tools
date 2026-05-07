@@ -30,7 +30,7 @@
     .\Get-CustomerReport.ps1 -TenantId "contoso.com" -AdminUPN "admin@contoso.com" -TenantName "Contoso"
 .NOTES
     Authors:  Rosvall & Claude
-    Version:  1.3.4
+    Version:  1.3.5
     Changelog:
         1.0.0 - Initial release
         1.1.0 - Fix IsExternal to check all verified tenant domains (not only primary)
@@ -61,6 +61,9 @@
         1.3.4 - Add -IverBranding switch: dark theme, Iver yellow (#FCDE06) accents, logo
                 embedded as base64 in header and footer (self-contained HTML, no external assets)
               - Requires Iver-BrandConfig.ps1 and iver-complete-neg.png alongside the script
+        1.3.5 - Fix: -TenantId now matches by ShortName, TenantId field, or PrimaryDomain in
+                customers.json — so -TenantId "AntilopGroup" loads the profile and uses its
+                real TenantId instead of passing the short name to Connect-MgGraph
 #>
 
 [CmdletBinding()]
@@ -103,6 +106,22 @@ if (Test-Path $CustomersFile) {
             Write-Host "Customer '$Customer' not found in $CustomersFile. Available: $available" -ForegroundColor Yellow
             exit 0
         }
+    } elseif ($TenantId) {
+        # -TenantId passed — try to match by ShortName, TenantId field, or PrimaryDomain
+        # so that -TenantId "AntilopGroup" or -TenantId "antilopgroup.se" both load the profile
+        $matched = $profileList | Where-Object {
+            $_.ShortName -ieq $TenantId -or $_.TenantId -ieq $TenantId -or $_.PrimaryDomain -ieq $TenantId
+        }
+        if ($matched) {
+            $profileData = $matched
+            Write-Host ""
+            Write-Host "[INFO] Matched profile '$($profileData.ShortName)' via -TenantId lookup" -ForegroundColor Cyan
+            Write-Host "       TenantId : $($profileData.TenantId)" -ForegroundColor Cyan
+            Write-Host "       Domain   : $($profileData.PrimaryDomain)" -ForegroundColor Cyan
+            # Clear so $EffectiveTenantId picks up the real value from profileData below
+            $TenantId = $null
+        }
+        # If no match: profileData stays null, TenantId stays as literal domain/GUID for Graph connect
     } elseif ($profileList.Count -eq 1 -and -not $TenantId) {
         $profileData = $profileList[0]
         Write-Host ""
