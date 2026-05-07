@@ -29,7 +29,15 @@
 .EXAMPLE
     .\Get-CustomerReport.ps1 -TenantId "contoso.com" -AdminUPN "admin@contoso.com" -TenantName "Contoso"
 .NOTES
-    Authors: Rosvall & Claude
+    Authors:  Rosvall & Claude
+    Version:  1.1.0
+    Changelog:
+        1.0.0 - Initial release
+        1.1.0 - Fix IsExternal to check all verified tenant domains (not only primary)
+              - Fix finding detail text for external Global Admin alert
+              - Add IE=edge meta tag and browser compatibility warning banner
+              - Auto-update customers.json LastReportDate and LastReportPath after each run
+              - Expand customers.template.json with PrimaryDomain, AllDomains, Country, etc.
 #>
 
 [CmdletBinding()]
@@ -1056,7 +1064,7 @@ function sort(tId,col){
 </div>
 
 </main>
-<footer>Get-CustomerReport.ps1 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: source\$sourceTimestamp\</footer>
+<footer>Get-CustomerReport.ps1 v1.1.0 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: source\$sourceTimestamp\</footer>
 </body>
 </html>
 "@
@@ -1068,6 +1076,29 @@ if (-not (Test-Path $OutputPath)) {
 $fileName   = "$($EffectiveTenantName -replace '[^a-zA-Z0-9]','-')_CustomerReport_$(Get-Date -Format 'yyyyMMdd_HHmm').html"
 $reportFile = Join-Path $OutputPath $fileName
 $html | Set-Content -Path $reportFile -Encoding UTF8
+
+# ── UPDATE CUSTOMERS.JSON ──────────────────────────────────────────────────────
+if ($profileData -and (Test-Path $CustomersFile)) {
+    try {
+        $profiles = Get-Content $CustomersFile -Raw | ConvertFrom-Json
+        $profileList = @($profiles)
+        $target = $profileList | Where-Object { $_.ShortName -ieq $profileData.ShortName }
+        if ($target) {
+            if (-not ($target | Get-Member -Name LastReportDate -ErrorAction SilentlyContinue)) {
+                $target | Add-Member -NotePropertyName LastReportDate -NotePropertyValue "" -Force
+            }
+            if (-not ($target | Get-Member -Name LastReportPath -ErrorAction SilentlyContinue)) {
+                $target | Add-Member -NotePropertyName LastReportPath -NotePropertyValue "" -Force
+            }
+            $target.LastReportDate = (Get-Date -Format 'yyyy-MM-dd HH:mm')
+            $target.LastReportPath = $reportFile
+            $profileList | ConvertTo-Json -Depth 10 | Set-Content $CustomersFile -Encoding UTF8
+            Write-Host "[INFO] customers.json updated with LastReportDate and LastReportPath." -ForegroundColor Cyan
+        }
+    } catch {
+        Write-Warning "Could not update customers.json — $_"
+    }
+}
 
 Write-Host "`n[SUCCESS] Report saved:      $reportFile" -ForegroundColor Green
 Write-Host "[SUCCESS] Raw source data:   $sourcePath" -ForegroundColor Green

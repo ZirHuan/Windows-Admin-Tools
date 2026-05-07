@@ -1,16 +1,17 @@
 [
   {
-    "ShortName":         "example",
-    "DisplayName":       "Example Company AB",
-    "AdminUPN":          "admin@example.com",
-    "TenantId":          "00000000-0000-0000-0000-000000000000",
-    "DefaultLicenseSku": "O365_BUSINESS_PREMIUM"
-  },
-  {
-    "ShortName":         "customer2",
-    "DisplayName":       "Customer Two Inc",
-    "AdminUPN":          "admin@customer2.com",
-    "TenantId":          "00000000-0000-0000-0000-000000000000",
-    "DefaultLicenseSku": "SPB"
+    "ShortName":            "example",
+    "DisplayName":          "Example Company AB",
+    "TenantId":             "00000000-0000-0000-0000-000000000000",
+    "AdminUPN":             "admin@example.com",
+    "PrimaryDomain":        "example.com",
+    "AllDomains":           ["example.com", "example.se", "exampleAB.onmicrosoft.com"],
+    "Country":              "SE",
+    "TechNotificationMail": "notifications@example.com",
+    "TenantCreated":        "2020-01-01",
+    "PrimaryLicenseSku":    "SPB",
+    "LastReportDate":       "",
+    "LastReportPath":       "",
+    "Notes":                ""
   }
 ]
