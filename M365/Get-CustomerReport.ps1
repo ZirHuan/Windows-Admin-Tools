@@ -30,7 +30,7 @@
     .\Get-CustomerReport.ps1 -TenantId "contoso.com" -AdminUPN "admin@contoso.com" -TenantName "Contoso"
 .NOTES
     Authors:  Rosvall & Claude
-    Version:  1.1.0
+    Version:  1.3.2
     Changelog:
         1.0.0 - Initial release
         1.1.0 - Fix IsExternal to check all verified tenant domains (not only primary)
@@ -48,6 +48,11 @@
         1.3.1 - Auto-select now shows customer details and asks confirmation before proceeding
               - Session check moved to single summary block after module load; warns on tenant mismatch
               - Graph/EXO connect sections simplified — no duplicate session prompts
+        1.3.2 - Fix auto-select bypass: -TenantId now correctly skips single-profile auto-select
+              - Replace all throw with Write-Host + exit 0 for clean non-exception exits
+              - Remove all Disconnect-ExchangeOnline calls — crashes process in EXO 3.9.x
+                (MSAL WAM broker NullReferenceException in ClearAllTokensAsync background thread)
+              - EXO REST sessions now expire automatically; only Graph is explicitly disconnected
 #>
 
 [CmdletBinding()]
@@ -1126,7 +1131,7 @@ function sort(tId,col){
 </div>
 
 </main>
-<footer>Get-CustomerReport.ps1 v1.3.0 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\</footer>
+<footer>Get-CustomerReport.ps1 v1.3.2 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\</footer>
 </body>
 </html>
 "@
