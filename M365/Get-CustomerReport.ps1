@@ -96,7 +96,8 @@ if (Test-Path $CustomersFile) {
         $yn = Read-Host "  Continue with this customer? (Y/N)"
         if ($yn -notmatch "^[Yy]$") {
             $available = ($profileList.ShortName) -join ', '
-            throw "Cancelled. Re-run with -Customer <name> to specify. Available: $available"
+            Write-Host "Cancelled. Re-run with -Customer <name> to specify. Available: $available" -ForegroundColor Yellow
+            exit 0
         }
     } elseif (-not $TenantId) {
         $available = ($profileList.ShortName) -join ', '
