@@ -30,7 +30,7 @@
     .\Get-CustomerReport.ps1 -TenantId "contoso.com" -AdminUPN "admin@contoso.com" -TenantName "Contoso"
 .NOTES
     Authors:  Rosvall & Claude
-    Version:  1.3.3
+    Version:  1.3.4
     Changelog:
         1.0.0 - Initial release
         1.1.0 - Fix IsExternal to check all verified tenant domains (not only primary)
@@ -58,6 +58,9 @@
               - Ask whether to save to customers.json at the start, not at the end
               - Output path prompt for new tenants deferred until after tenant is identified
               - Org data fetched once and reused (no duplicate API call)
+        1.3.4 - Add -IverBranding switch: dark theme, Iver yellow (#FCDE06) accents, logo
+                embedded as base64 in header and footer (self-contained HTML, no external assets)
+              - Requires Iver-BrandConfig.ps1 and iver-complete-neg.png alongside the script
 #>
 
 [CmdletBinding()]
@@ -76,7 +79,9 @@ param(
     # Automatically create or update customers.json with live data without prompting
     [switch]$UpdateCustomerProfile,
     # Automatically disconnect from Graph and Exchange Online after completion without prompting
-    [switch]$DisconnectAfter
+    [switch]$DisconnectAfter,
+    # Apply Iver brand identity: dark theme, Iver yellow accents, logo embedded in header and footer
+    [switch]$IverBranding
 )
 
 # ── CUSTOMER PROFILE RESOLUTION ───────────────────────────────────────────────
@@ -956,14 +961,98 @@ $lowCount   = ($findings | Where-Object { $_.Severity -eq "LOW" }).Count
 $mfaNote     = if ($mfaError) { " | MFA data: unavailable" } else { "" }
 $mfaNoteHtml = if ($mfaError) { "<div class='warning' style='margin:0 0 16px'>&#9888; MFA registration data could not be retrieved. Reconnect to Microsoft Graph with the <strong>UserAuthenticationMethod.Read.All</strong> scope included to populate the MFA column.</div>" } else { "" }
 
-$html = @"
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta http-equiv="X-UA-Compatible" content="IE=edge">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>$EffectiveTenantName — M365 Customer Report</title>
+# ── BRAND SETUP ───────────────────────────────────────────────────────────────
+$logoB64Html    = ""
+$footerLogoHtml = ""
+if ($IverBranding) {
+    $logoFile = Join-Path $PSScriptRoot "iver-complete-neg.png"
+    if (Test-Path $logoFile) {
+        $b64            = [Convert]::ToBase64String([IO.File]::ReadAllBytes($logoFile))
+        $logoB64Html    = "<img src='data:image/png;base64,$b64' style='height:36px;margin-bottom:10px;display:block' alt='Iver' />"
+        $footerLogoHtml = "<img src='data:image/png;base64,$b64' style='height:20px;opacity:.7;vertical-align:middle;margin-right:6px' alt='Iver' />"
+    } else {
+        Write-Warning "IverBranding: logo not found at $logoFile — header will have no logo."
+    }
+}
+
+$cssBlock = if ($IverBranding) {
+@"
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Arial Nova',Arial,sans-serif;background:#505050;color:#ffffff;font-size:14px}
+header{background:linear-gradient(135deg,#323232 0%,#505050 100%);color:white;padding:24px 40px;border-bottom:4px solid #FCDE06}
+header h1{font-size:22px;font-weight:600;color:#ffffff}
+header p{font-size:13px;color:#A0A0A0;margin-top:4px}
+nav{background:#323232;border-bottom:1px solid #404040;padding:0 32px;display:flex;gap:0;position:sticky;top:0;z-index:100;box-shadow:0 1px 3px rgba(0,0,0,.4);overflow-x:auto}
+nav a{display:block;padding:13px 14px;font-size:12px;font-weight:600;color:#A0A0A0;text-decoration:none;border-bottom:3px solid transparent;white-space:nowrap}
+nav a:hover{color:#FCDE06;border-bottom-color:#FCDE06}
+main{max-width:1500px;margin:0 auto;padding:24px 40px}
+.section{background:rgba(255,255,255,0.04);border-radius:4px;padding:24px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,.3);border:1px solid rgba(130,130,130,0.3)}
+.section h2{font-size:16px;font-weight:600;color:#FCDE06;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid rgba(130,130,130,0.3)}
+.section h3{font-size:13px;font-weight:600;color:#D2D2D2;margin:20px 0 10px}
+.stat-grid{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}
+.stat-card{background:rgba(255,255,255,0.06);border-radius:4px;padding:16px 20px;min-width:130px;flex:1;border-top:4px solid #FCDE06!important;border:1px solid rgba(130,130,130,0.3)}
+.stat-value{font-size:28px;font-weight:700;color:#FCDE06}
+.stat-label{font-size:12px;color:#A0A0A0;margin-top:2px}
+.info-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:16px}
+.info-grid div{background:rgba(255,255,255,0.05);padding:12px 16px;border-radius:4px;border:1px solid rgba(130,130,130,0.3)}
+.info-grid .label{display:block;font-size:11px;color:#A0A0A0;text-transform:uppercase;letter-spacing:.5px}
+.info-grid .value{display:block;font-size:14px;font-weight:600;margin-top:2px;color:#ffffff}
+.score-card{background:rgba(255,255,255,0.05);border-radius:4px;padding:16px 24px;min-width:180px;border:1px solid rgba(130,130,130,0.3);align-self:flex-start}
+.score-label{font-size:11px;color:#A0A0A0;text-transform:uppercase;letter-spacing:.5px}
+.score-num{font-size:32px;font-weight:700;color:#FCDE06;margin:4px 0 2px}
+.score-max{font-size:15px;color:#A0A0A0;font-weight:400}
+.score-bar-bg{background:#404040;border-radius:4px;height:8px;margin:6px 0 4px}
+.score-bar{height:8px;border-radius:4px}
+.score-pct{font-size:12px;color:#A0A0A0}
+.tenant-top{display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap}
+table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
+thead{background:#323232}
+th{text-align:left;padding:10px 12px;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#FCDE06;border-bottom:2px solid #FCDE06;cursor:pointer;white-space:nowrap}
+th:hover{background:#404040}
+td{padding:9px 12px;border-bottom:1px solid rgba(130,130,130,0.2);vertical-align:middle;color:#ffffff}
+tr:hover td{background:rgba(252,222,6,0.05)}
+tr:last-child td{border-bottom:none}
+.row-never td{background:rgba(232,17,35,0.15)!important}
+.row-inactive td{background:rgba(255,185,0,0.1)!important}
+.row-disabled td{background:rgba(255,255,255,0.02)!important;opacity:.7}
+.finding{border-radius:4px;padding:16px 20px;margin-bottom:12px;border-left:5px solid #828282}
+.finding-high{background:rgba(232,17,35,0.1);border-left-color:#e81123}
+.finding-medium{background:rgba(216,59,1,0.1);border-left-color:#d83b01}
+.finding-low{background:rgba(252,222,6,0.08);border-left-color:#FCDE06}
+.finding-head{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+.finding p{font-size:13px;color:#D2D2D2}
+.action-line{margin-top:8px!important;font-size:12px!important;color:#A0A0A0!important;font-style:italic}
+.badge{display:inline-block;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;letter-spacing:.5px}
+.badge-high{background:#e81123;color:white}
+.badge-medium{background:#d83b01;color:white}
+.badge-low{background:#FCDE06;color:#323232}
+.badge-ext{background:#e81123;color:white;font-size:10px;padding:2px 6px;border-radius:10px;font-weight:700}
+.badge-guest{background:#8764b8;color:white;font-size:10px;padding:2px 6px;border-radius:10px}
+.badge-never{color:#F44336;font-weight:700}
+.badge-yes{background:#4CAF50;color:white;font-size:11px;padding:2px 8px;border-radius:10px}
+.badge-no{background:#F44336;color:white;font-size:11px;padding:2px 8px;border-radius:10px}
+.pill{display:inline-block;background:rgba(252,222,6,0.15);color:#FCDE06;padding:2px 8px;border-radius:10px;margin:2px;font-size:11px;white-space:nowrap}
+.ok{color:#4CAF50;font-weight:600}
+.bad{color:#F44336;font-weight:600}
+.na{color:#828282;font-style:italic}
+.empty{color:#A0A0A0;font-style:italic;padding:12px 0}
+.warning{background:rgba(255,185,0,0.1);border-left:4px solid #FCDE06;padding:12px 16px;border-radius:0 4px 4px 0;color:#D2D2D2;margin:6px 0}
+.search-bar{margin:12px 0;padding:10px;background:#404040;border-radius:4px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.search-bar input{flex:1;min-width:200px;max-width:360px;padding:7px 12px;border:1px solid #828282;border-radius:4px;font-size:13px;background:#505050;color:#ffffff}
+.search-bar input:focus{outline:none;border-color:#FCDE06}
+.filter-btn{padding:5px 12px;border:1px solid #828282;background:#505050;cursor:pointer;border-radius:4px;font-size:12px;font-weight:600;color:#D2D2D2;transition:all .15s}
+.filter-btn:hover{border-color:#FCDE06;color:#FCDE06}
+.filter-btn.active{background:#FCDE06;color:#323232;border-color:#FCDE06}
+.legend{display:flex;gap:14px;margin:6px 0 10px;font-size:12px;flex-wrap:wrap;color:#A0A0A0}
+.legend-item{display:flex;align-items:center;gap:6px}
+.ldot{width:12px;height:12px;border-radius:2px;flex-shrink:0}
+footer{text-align:center;padding:20px;color:#A0A0A0;font-size:12px;border-top:1px solid #505050}
+@media print{body{background:white;color:black}header{background:white;border-bottom:2px solid black}nav{display:none}.section{border:1px solid #ccc;background:white}.section h2,.stat-value,th{color:black!important}td{color:black!important}th{border-bottom:1px solid black}}
+</style>
+"@
+} else {
+@"
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',system-ui,sans-serif;background:#f3f2f1;color:#323130;font-size:14px}
@@ -1036,6 +1125,45 @@ tr:last-child td{border-bottom:none}
 .ldot{width:12px;height:12px;border-radius:2px;flex-shrink:0}
 footer{text-align:center;padding:20px;color:#605e5c;font-size:12px}
 </style>
+"@
+}
+
+$reportHeaderHtml = if ($IverBranding) {
+@"
+<header>
+  $logoB64Html
+  <h1>$EffectiveTenantName &mdash; M365 Customer Report</h1>
+  <p>Generated $reportDate &nbsp;&bull;&nbsp; Findings: <strong>$highCount HIGH</strong> &nbsp;&bull;&nbsp; $medCount MEDIUM &nbsp;&bull;&nbsp; $lowCount LOW$mfaNote</p>
+</header>
+"@
+} else {
+@"
+<header>
+  <h1>$EffectiveTenantName &mdash; M365 Customer Report</h1>
+  <p>Generated $reportDate &nbsp;&bull;&nbsp; Findings: <strong>$highCount HIGH</strong> &nbsp;&bull;&nbsp; $medCount MEDIUM &nbsp;&bull;&nbsp; $lowCount LOW$mfaNote</p>
+</header>
+"@
+}
+
+$reportFooterHtml = if ($IverBranding) {
+@"
+<footer>${footerLogoHtml}Get-CustomerReport.ps1 v1.3.4 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\<br><small style="opacity:.6">&copy; $(Get-Date -Format 'yyyy') Iver Managed Services</small></footer>
+"@
+} else {
+@"
+<footer>Get-CustomerReport.ps1 v1.3.4 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\</footer>
+"@
+}
+
+$html = @"
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>$EffectiveTenantName — M365 Customer Report</title>
+$cssBlock
 <script>
 function search(tId,iId){
   const f=document.getElementById(iId).value.toLowerCase();
@@ -1072,10 +1200,7 @@ function sort(tId,col){
   This report requires a modern browser (Edge, Chrome, or Firefox). Internet Explorer is not supported.
 </div>
 <![endif]-->
-<header>
-  <h1>$EffectiveTenantName &mdash; M365 Customer Report</h1>
-  <p>Generated $reportDate &nbsp;&bull;&nbsp; Findings: <strong>$highCount HIGH</strong> &nbsp;&bull;&nbsp; $medCount MEDIUM &nbsp;&bull;&nbsp; $lowCount LOW$mfaNote</p>
-</header>
+$reportHeaderHtml
 <nav>
   <a href="#findings">&#128680; Key Findings</a>
   <a href="#tenant">&#127970; Tenant</a>
@@ -1179,7 +1304,7 @@ function sort(tId,col){
 </div>
 
 </main>
-<footer>Get-CustomerReport.ps1 v1.3.3 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\</footer>
+$reportFooterHtml
 </body>
 </html>
 "@
