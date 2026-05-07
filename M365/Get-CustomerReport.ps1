@@ -204,9 +204,10 @@ Write-Host $exoStatus   -ForegroundColor $(if ($exoConnInfo) { 'Cyan' } else { '
 if ($graphContext -or $exoConnInfo) {
     $yn = Read-Host "`n  Disconnect existing session(s) before continuing? (Y/N)"
     if ($yn -match "^[Yy]$") {
-        if ($exoConnInfo)  { Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue }
+        # EXO disconnect is intentionally skipped — Disconnect-ExchangeOnline crashes the process
+        # in ExchangeOnlineManagement 3.9.x (MSAL WAM broker bug). EXO REST sessions expire automatically.
         if ($graphContext) { Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null; $graphContext = $null }
-        Write-Host "  Sessions disconnected." -ForegroundColor Yellow
+        Write-Host "  Graph disconnected. EXO session will expire automatically (see known EXO 3.9.x bug)." -ForegroundColor Yellow
     }
 }
 Write-Host ""
@@ -1259,15 +1260,18 @@ Write-Host "[SUCCESS] Raw source data:   $sourcePath" -ForegroundColor Green
 Start-Process $reportFile
 
 # ── DISCONNECT ─────────────────────────────────────────────────────────────────
+# NOTE: Disconnect-ExchangeOnline is intentionally omitted — it crashes the PowerShell
+# process in ExchangeOnlineManagement 3.9.x via an unhandled MSAL WAM broker exception
+# in a background thread that cannot be caught. EXO REST sessions expire automatically.
+# To manually disconnect EXO safely, run: Disconnect-ExchangeOnline -Confirm:$false
+# in a fresh PS window after this script completes.
 if ($DisconnectAfter) {
-    if ($exoConnected) { Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue }
     Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
-    Write-Host "[INFO] Disconnected from Microsoft Graph and Exchange Online." -ForegroundColor Cyan
+    Write-Host "[INFO] Graph disconnected. EXO session expires automatically." -ForegroundColor Cyan
 } else {
-    $yn = Read-Host "`n[PROMPT] Disconnect from Microsoft Graph and Exchange Online? (Y/N)"
+    $yn = Read-Host "`n[PROMPT] Disconnect from Microsoft Graph? (Y/N)"
     if ($yn -match "^[Yy]$") {
-        if ($exoConnected) { Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue }
         Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
-        Write-Host "[INFO] Disconnected." -ForegroundColor Cyan
+        Write-Host "[INFO] Graph disconnected. EXO session expires automatically." -ForegroundColor Cyan
     }
 }
