@@ -38,6 +38,9 @@
               - Add IE=edge meta tag and browser compatibility warning banner
               - Auto-update customers.json LastReportDate and LastReportPath after each run
               - Expand customers.template.json with PrimaryDomain, AllDomains, Country, etc.
+        1.2.0 - Prompt to create or update customers.json with live collected data
+              - Prompt to confirm or override the output folder (UseDefaultOutputPath switch to skip)
+              - Prompt to disconnect Graph and Exchange Online after completion (DisconnectAfter switch to auto)
 #>
 
 [CmdletBinding()]
@@ -50,7 +53,13 @@ param(
     [string]$OutputPath,
     [ValidateRange(1, 3650)]
     [int]$InactiveThresholdDays = 90,
-    [switch]$SkipExchangeOnline
+    [switch]$SkipExchangeOnline,
+    # Skip the output path prompt and use the default .\<shortname>\ folder
+    [switch]$UseDefaultOutputPath,
+    # Automatically create or update customers.json with live data without prompting
+    [switch]$UpdateCustomerProfile,
+    # Automatically disconnect from Graph and Exchange Online after completion without prompting
+    [switch]$DisconnectAfter
 )
 
 # ── CUSTOMER PROFILE RESOLUTION ───────────────────────────────────────────────
@@ -86,7 +95,14 @@ $EffectiveTenantName = if ($TenantName) { $TenantName } elseif ($profileData.Dis
 $shortName           = if ($profileData.ShortName) { $profileData.ShortName } else { $EffectiveTenantName -replace '[^a-zA-Z0-9]','' }
 
 if (-not $OutputPath) {
-    $OutputPath = Join-Path $PSScriptRoot $shortName
+    $defaultPath = Join-Path $PSScriptRoot $shortName
+    if ($UseDefaultOutputPath) {
+        $OutputPath = $defaultPath
+    } else {
+        Write-Host "[INFO] Default output folder: $defaultPath" -ForegroundColor Cyan
+        $customPath = Read-Host "  Press Enter to use default, or type a new path"
+        $OutputPath = if ($customPath.Trim()) { $customPath.Trim() } else { $defaultPath }
+    }
 }
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
@@ -1064,7 +1080,7 @@ function sort(tId,col){
 </div>
 
 </main>
-<footer>Get-CustomerReport.ps1 v1.1.0 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: source\$sourceTimestamp\</footer>
+<footer>Get-CustomerReport.ps1 v1.2.0 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: source\$sourceTimestamp\</footer>
 </body>
 </html>
 "@
@@ -1077,29 +1093,126 @@ $fileName   = "$($EffectiveTenantName -replace '[^a-zA-Z0-9]','-')_CustomerRepor
 $reportFile = Join-Path $OutputPath $fileName
 $html | Set-Content -Path $reportFile -Encoding UTF8
 
-# ── UPDATE CUSTOMERS.JSON ──────────────────────────────────────────────────────
+# ── UPDATE / CREATE CUSTOMERS.JSON ────────────────────────────────────────────
+# Derive suggested values from live collected data
+$suggestedAdminUPN = $EffectiveAdminUPN
+if (-not $suggestedAdminUPN) {
+    $suggestedAdminUPN = ($roleRows | Where-Object {
+        $_.Role -eq "Global Administrator" -and -not $_.IsExternal
+    } | Select-Object -First 1).UserPrincipalName
+}
+$primaryLicenseSku = ($skus | Where-Object {
+    $_.PrepaidUnits.Enabled -gt 0 -and $_.PrepaidUnits.Enabled -lt 10000 -and
+    $_.ConsumedUnits -gt 0 -and $_.SkuPartNumber -notmatch "FREE|VIRAL|EXPLORATORY"
+} | Sort-Object ConsumedUnits -Descending | Select-Object -First 1).SkuPartNumber
+$techMail = if ($org.TechnicalNotificationMails) { $org.TechnicalNotificationMails[0] } else { "" }
+
+function Update-ProfileFields {
+    param($target)
+    $fields = @{
+        TenantId             = $org.Id
+        DisplayName          = $org.DisplayName
+        PrimaryDomain        = $primaryDomain
+        AllDomains           = @($tenantDomainNames)
+        Country              = $org.CountryLetterCode
+        TechNotificationMail = $techMail
+        TenantCreated        = if ($org.CreatedDateTime) { ([datetime]$org.CreatedDateTime).ToString('yyyy-MM-dd') } else { "" }
+        PrimaryLicenseSku    = $primaryLicenseSku
+        LastReportDate       = (Get-Date -Format 'yyyy-MM-dd HH:mm')
+        LastReportPath       = $reportFile
+    }
+    foreach ($key in $fields.Keys) {
+        if (-not ($target | Get-Member -Name $key -ErrorAction SilentlyContinue)) {
+            $target | Add-Member -NotePropertyName $key -NotePropertyValue $null -Force
+        }
+        $target.$key = $fields[$key]
+    }
+    return $target
+}
+
+$doUpdate = $false
+$doCreate = $false
+
 if ($profileData -and (Test-Path $CustomersFile)) {
+    if ($UpdateCustomerProfile) {
+        $doUpdate = $true
+    } else {
+        Write-Host ""
+        $yn = Read-Host "[PROMPT] Update customers.json for '$($profileData.ShortName)' with live tenant data? (Y/N)"
+        $doUpdate = $yn -match "^[Yy]$"
+    }
+} elseif (-not $profileData) {
+    if ($UpdateCustomerProfile) {
+        $doCreate = $true
+    } else {
+        Write-Host ""
+        $yn = Read-Host "[PROMPT] No customers.json profile loaded. Create a new entry for this tenant? (Y/N)"
+        $doCreate = $yn -match "^[Yy]$"
+    }
+}
+
+if ($doUpdate -and (Test-Path $CustomersFile)) {
     try {
-        $profiles = Get-Content $CustomersFile -Raw | ConvertFrom-Json
+        $profiles    = Get-Content $CustomersFile -Raw | ConvertFrom-Json
         $profileList = @($profiles)
-        $target = $profileList | Where-Object { $_.ShortName -ieq $profileData.ShortName }
+        $target      = $profileList | Where-Object { $_.ShortName -ieq $profileData.ShortName }
         if ($target) {
-            if (-not ($target | Get-Member -Name LastReportDate -ErrorAction SilentlyContinue)) {
-                $target | Add-Member -NotePropertyName LastReportDate -NotePropertyValue "" -Force
-            }
-            if (-not ($target | Get-Member -Name LastReportPath -ErrorAction SilentlyContinue)) {
-                $target | Add-Member -NotePropertyName LastReportPath -NotePropertyValue "" -Force
-            }
-            $target.LastReportDate = (Get-Date -Format 'yyyy-MM-dd HH:mm')
-            $target.LastReportPath = $reportFile
+            $target = Update-ProfileFields $target
             $profileList | ConvertTo-Json -Depth 10 | Set-Content $CustomersFile -Encoding UTF8
-            Write-Host "[INFO] customers.json updated with LastReportDate and LastReportPath." -ForegroundColor Cyan
+            Write-Host "[INFO] customers.json updated for '$($profileData.ShortName)'." -ForegroundColor Green
         }
     } catch {
         Write-Warning "Could not update customers.json — $_"
     }
 }
 
+if ($doCreate) {
+    try {
+        $newShortName = Read-Host "  Enter a short name for this customer (e.g. 'contoso')"
+        if ($newShortName.Trim()) {
+            $newEntry = [PSCustomObject]@{
+                ShortName            = $newShortName.Trim()
+                DisplayName          = $org.DisplayName
+                TenantId             = $org.Id
+                AdminUPN             = $suggestedAdminUPN
+                PrimaryDomain        = $primaryDomain
+                AllDomains           = @($tenantDomainNames)
+                Country              = $org.CountryLetterCode
+                TechNotificationMail = $techMail
+                TenantCreated        = if ($org.CreatedDateTime) { ([datetime]$org.CreatedDateTime).ToString('yyyy-MM-dd') } else { "" }
+                PrimaryLicenseSku    = $primaryLicenseSku
+                LastReportDate       = (Get-Date -Format 'yyyy-MM-dd HH:mm')
+                LastReportPath       = $reportFile
+                Notes                = ""
+            }
+            $existingProfiles = @()
+            if (Test-Path $CustomersFile) {
+                $existingProfiles = @(Get-Content $CustomersFile -Raw | ConvertFrom-Json)
+            }
+            ($existingProfiles + $newEntry) | ConvertTo-Json -Depth 10 | Set-Content $CustomersFile -Encoding UTF8
+            Write-Host "[INFO] New customer profile '$($newShortName.Trim())' added to $CustomersFile." -ForegroundColor Green
+        } else {
+            Write-Warning "No short name entered — profile not created."
+        }
+    } catch {
+        Write-Warning "Could not create customers.json entry — $_"
+    }
+}
+
 Write-Host "`n[SUCCESS] Report saved:      $reportFile" -ForegroundColor Green
 Write-Host "[SUCCESS] Raw source data:   $sourcePath" -ForegroundColor Green
 Start-Process $reportFile
+
+# ── DISCONNECT ─────────────────────────────────────────────────────────────────
+if ($DisconnectAfter) {
+    Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+    if ($exoConnected) { Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue }
+    Write-Host "[INFO] Disconnected from Microsoft Graph and Exchange Online." -ForegroundColor Cyan
+} else {
+    $yn = Read-Host "`n[PROMPT] Disconnect from Microsoft Graph and Exchange Online? (Y/N)"
+    if ($yn -match "^[Yy]$") {
+        Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+        if ($exoConnected) { Disconnect-ExchangeOnline -Confirm:$false -ErrorAction SilentlyContinue }
+        Write-Host "[INFO] Disconnected." -ForegroundColor Cyan
+    }
+}
