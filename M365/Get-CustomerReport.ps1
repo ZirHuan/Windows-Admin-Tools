@@ -30,7 +30,7 @@
     .\Get-CustomerReport.ps1 -TenantId "contoso.com" -AdminUPN "admin@contoso.com" -TenantName "Contoso"
 .NOTES
     Authors:  Rosvall & Claude
-    Version:  1.3.6
+    Version:  1.4.0
     Changelog:
         1.0.0 - Initial release
         1.1.0 - Fix IsExternal to check all verified tenant domains (not only primary)
@@ -67,6 +67,11 @@
         1.3.6 - IverBranding: replace emoji section icons with official Iver branded icons
                 (base64-embedded PNGs from Ikoner\ folder next to the script); falls back to
                 emoji if Ikoner\ folder is absent
+        1.4.0 - Split Subscriptions & Licenses section into Paid and Free/Auto-provisioned tables
+              - Conditional Access table expanded with Users scope, Apps scope, and Grant Controls columns
+              - Intune compliance breakdown: Compliant / Non-Compliant / Unknown stat cards + non-compliant device list
+              - Nav bar icons use branded PNGs when -IverBranding active (same Ikoner\ source as section headings)
+              - New findings: Global Admin count > 3 (MEDIUM); licensed users with password age > 365 days (MEDIUM)
 #>
 
 [CmdletBinding()]
@@ -194,6 +199,44 @@ function ConvertTo-HtmlTable {
         $h += "</tbody></table>"
         return $h
     }
+}
+
+function Build-SkuTableRows {
+    param([array]$SkuList)
+    $html = ""
+    foreach ($sku in $SkuList) {
+        $friendly   = if ($licenseCatalog.ContainsKey($sku.SkuPartNumber)) { $licenseCatalog[$sku.SkuPartNumber] } else { $sku.SkuPartNumber }
+        $purchased  = $sku.PrepaidUnits.Enabled
+        $consumed   = $sku.ConsumedUnits
+        $available  = $purchased - $consumed
+        $availStyle = if ($available -gt 0 -and $purchased -gt 0 -and $purchased -lt 10000) { "style='color:#d83b01;font-weight:600'" } else { "" }
+        $sub        = $subLookup[$sku.SkuPartNumber]
+        $renewDate  = "—"
+        $renewStyle = ""
+        $subStatus  = if ($sub) { $sub.status } else { "—" }
+        $isTrial    = if ($sub -and $sub.isTrial) { " <span style='background:#8764b8;color:white;font-size:10px;padding:2px 6px;border-radius:10px'>Trial</span>" } else { "" }
+        if ($sub -and $sub.nextLifecycleDateTime) {
+            $expDate   = [datetime]$sub.nextLifecycleDateTime
+            $renewDate = $expDate.ToString("yyyy-MM-dd")
+            if     ($expDate -lt $today.AddDays(60)) { $renewStyle = "style='color:#e81123;font-weight:600'" }
+            elseif ($expDate -lt $today.AddDays(90)) { $renewStyle = "style='color:#d83b01;font-weight:600'" }
+        }
+        $statusColor = switch ($subStatus) {
+            "Enabled"   { "#107c10" }
+            "Warning"   { "#d83b01" }
+            "Suspended" { "#e81123" }
+            default     { "#605e5c" }
+        }
+        $html += "<tr>"
+        $html += "<td><small>$([System.Web.HttpUtility]::HtmlEncode($sku.SkuPartNumber))</small></td>"
+        $html += "<td>$([System.Web.HttpUtility]::HtmlEncode($friendly))$isTrial</td>"
+        $html += "<td><span style='color:$statusColor;font-weight:600'>$subStatus</span></td>"
+        $html += "<td>$purchased</td><td>$consumed</td>"
+        $html += "<td $availStyle>$available</td>"
+        $html += "<td $renewStyle>$renewDate</td>"
+        $html += "</tr>`n"
+    }
+    return $html
 }
 
 # ── MODULE CHECK ──────────────────────────────────────────────────────────────
@@ -702,6 +745,31 @@ if ($org.TechnicalNotificationMails) {
     }
 }
 
+# Global Admin count > 3
+$allGAs = @($roleRows | Where-Object { $_.Role -eq "Global Administrator" })
+if ($allGAs.Count -gt 3) {
+    $gaNames = ($allGAs.UserPrincipalName) -join ", "
+    $findings.Add([PSCustomObject]@{
+        Severity = "MEDIUM"
+        Title    = "$($allGAs.Count) Global Administrator accounts detected — consider reducing"
+        Detail   = "Having more than 3 active Global Admins increases attack surface. Accounts: $gaNames"
+        Action   = "Review each account and assign least-privilege roles (Exchange Admin, User Admin, etc.) where full Global Admin is not required."
+    })
+}
+
+# Licensed users with password not changed in over 365 days
+$oldPwdUsers = @($processedUsers | Where-Object { $_.IsLicensed -and $_.Enabled -and $_.PasswordAge -gt 365 })
+if ($oldPwdUsers.Count -gt 0) {
+    $topOld = ($oldPwdUsers | Sort-Object PasswordAge -Descending | Select-Object -First 3 |
+        ForEach-Object { "$($_.DisplayName) ($($_.PasswordAge)d)" }) -join ", "
+    $findings.Add([PSCustomObject]@{
+        Severity = "MEDIUM"
+        Title    = "$($oldPwdUsers.Count) licensed user(s) have not changed password in over a year"
+        Detail   = "Long-lived passwords increase risk from credential compromise. Oldest: $topOld"
+        Action   = "Enable a password expiry policy, or force a password reset at next sign-in for affected accounts."
+    })
+}
+
 # ── SAVE SOURCE DATA ──────────────────────────────────────────────────────────
 $sourceTimestamp = Get-Date -Format "yyyyMMdd_HHmm"
 $sourcePath      = Join-Path $OutputPath "$shortName.source\$sourceTimestamp"
@@ -787,46 +855,20 @@ $tenantInfoHtml += "</div>"
 # Domains table
 $domainsHtml = $domains | ConvertTo-HtmlTable
 
-# License / Subscription table
-$subRowsHtml = ""
-foreach ($sku in ($skus | Sort-Object SkuPartNumber)) {
-    $friendly  = if ($licenseCatalog.ContainsKey($sku.SkuPartNumber)) { $licenseCatalog[$sku.SkuPartNumber] } else { $sku.SkuPartNumber }
-    $purchased = $sku.PrepaidUnits.Enabled
-    $consumed  = $sku.ConsumedUnits
-    $available = $purchased - $consumed
-    $availStyle = if ($available -gt 0 -and $purchased -gt 0) { "style='color:#d83b01;font-weight:600'" } else { "" }
+# License / Subscription tables — split paid vs free/auto-provisioned
+$paidSkuList = @($skus | Where-Object {
+    $_.PrepaidUnits.Enabled -gt 0 -and $_.PrepaidUnits.Enabled -lt 10000 -and
+    $_.SkuPartNumber -notmatch "FREE|VIRAL|EXPLORATORY"
+} | Sort-Object SkuPartNumber)
 
-    $sub        = $subLookup[$sku.SkuPartNumber]
-    $renewDate  = "—"
-    $renewStyle = ""
-    $subStatus  = if ($sub) { $sub.status } else { "—" }
-    $isTrial    = if ($sub -and $sub.isTrial) { " <span style='background:#8764b8;color:white;font-size:10px;padding:2px 6px;border-radius:10px'>Trial</span>" } else { "" }
+$freeSkuList = @($skus | Where-Object {
+    $_.PrepaidUnits.Enabled -gt 0 -and
+    ($_.PrepaidUnits.Enabled -ge 10000 -or $_.SkuPartNumber -match "FREE|VIRAL|EXPLORATORY")
+} | Sort-Object SkuPartNumber)
 
-    if ($sub -and $sub.nextLifecycleDateTime) {
-        $expDate   = [datetime]$sub.nextLifecycleDateTime
-        $renewDate = $expDate.ToString("yyyy-MM-dd")
-        if ($expDate -lt $today.AddDays(60))  { $renewStyle = "style='color:#e81123;font-weight:600'" }
-        elseif ($expDate -lt $today.AddDays(90)) { $renewStyle = "style='color:#d83b01;font-weight:600'" }
-    }
-
-    $statusColor = switch ($subStatus) {
-        "Enabled"   { "#107c10" }
-        "Warning"   { "#d83b01" }
-        "Suspended" { "#e81123" }
-        default     { "#605e5c" }
-    }
-
-    $subRowsHtml += "<tr>"
-    $subRowsHtml += "<td><small>$([System.Web.HttpUtility]::HtmlEncode($sku.SkuPartNumber))</small></td>"
-    $subRowsHtml += "<td>$([System.Web.HttpUtility]::HtmlEncode($friendly))$isTrial</td>"
-    $subRowsHtml += "<td><span style='color:$statusColor;font-weight:600'>$subStatus</span></td>"
-    $subRowsHtml += "<td>$purchased</td>"
-    $subRowsHtml += "<td>$consumed</td>"
-    $subRowsHtml += "<td $availStyle>$available</td>"
-    $subRowsHtml += "<td $renewStyle>$renewDate</td>"
-    $subRowsHtml += "</tr>`n"
-}
-$subNoteHtml = if ($subDatesNote) { "<p class='warning' style='margin-top:10px'>&#9888; $([System.Web.HttpUtility]::HtmlEncode($subDatesNote))</p>" } else { "" }
+$paidRowsHtml = Build-SkuTableRows -SkuList $paidSkuList
+$freeRowsHtml = Build-SkuTableRows -SkuList $freeSkuList
+$subNoteHtml  = if ($subDatesNote) { "<p class='warning' style='margin-top:10px'>&#9888; $([System.Web.HttpUtility]::HtmlEncode($subDatesNote))</p>" } else { "" }
 
 # User stat cards
 $inactiveVal   = if ($null -ne $userStats.Inactive)      { $userStats.Inactive }      else { "N/A" }
@@ -928,14 +970,75 @@ $groupTableHtml = $groups | Select-Object DisplayName,
     @{N="Created";E={ if ($_.CreatedDateTime) { ([datetime]$_.CreatedDateTime).ToString("yyyy-MM-dd") } else { "" } }} |
     Sort-Object DisplayName | ConvertTo-HtmlTable
 
-# CA policies
-$caHtml = if ($caError) { "<p class='warning'>&#9888; $([System.Web.HttpUtility]::HtmlEncode($caError))</p>" }
-          else {
-              $caPolicies | Select-Object DisplayName, State,
-                  @{N="Created";E={ if ($_.CreatedDateTime) { ([datetime]$_.CreatedDateTime).ToString("yyyy-MM-dd") } else { "" } }},
-                  @{N="Modified";E={ if ($_.ModifiedDateTime) { ([datetime]$_.ModifiedDateTime).ToString("yyyy-MM-dd") } else { "" } }} |
-                  Sort-Object State, DisplayName | ConvertTo-HtmlTable
-          }
+# CA policies — custom table with grant controls detail
+$caHtml = if ($caError) {
+    "<p class='warning'>&#9888; $([System.Web.HttpUtility]::HtmlEncode($caError))</p>"
+} elseif (-not $caPolicies -or $caPolicies.Count -eq 0) {
+    "<p class='empty'>No Conditional Access policies found.</p>"
+} else {
+    $caRows = ""
+    foreach ($p in ($caPolicies | Sort-Object State, DisplayName)) {
+        $grantText = if ($p.GrantControls -and $p.GrantControls.BuiltInControls) {
+            $labels = $p.GrantControls.BuiltInControls | ForEach-Object {
+                switch ($_) {
+                    "mfa"                  { "MFA" }
+                    "compliantDevice"      { "Compliant device" }
+                    "domainJoinedDevice"   { "Domain joined" }
+                    "approvedApplication"  { "Approved app" }
+                    "compliantApplication" { "Compliant app" }
+                    "passwordChange"       { "Password change" }
+                    "block"                { "BLOCK" }
+                    default                { $_ }
+                }
+            }
+            $op = if ($p.GrantControls.Operator) { " $($p.GrantControls.Operator) " } else { ", " }
+            ($labels -join $op)
+        } elseif ($p.SessionControls -and (
+            ($p.SessionControls.ApplicationEnforcedRestrictions -and $p.SessionControls.ApplicationEnforcedRestrictions.IsEnabled) -or
+            ($p.SessionControls.CloudAppSecurity -and $p.SessionControls.CloudAppSecurity.IsEnabled))) {
+            "Session control"
+        } else { "—" }
+
+        $usersScope = if     ($p.Conditions.Users.IncludeUsers -contains "All")                  { "All users" }
+                      elseif ($p.Conditions.Users.IncludeUsers -contains "GuestsOrExternalUsers") { "Guests/External" }
+                      elseif ($p.Conditions.Users.IncludeGroups -and $p.Conditions.Users.IncludeGroups.Count -gt 0) { "$($p.Conditions.Users.IncludeGroups.Count) group(s)" }
+                      elseif ($p.Conditions.Users.IncludeRoles -and $p.Conditions.Users.IncludeRoles.Count -gt 0)   { "$($p.Conditions.Users.IncludeRoles.Count) role(s)" }
+                      else   { "Selected" }
+
+        $appsScope  = if     ($p.Conditions.Applications.IncludeApplications -contains "All")  { "All apps" }
+                      elseif ($p.Conditions.Applications.IncludeApplications -and $p.Conditions.Applications.IncludeApplications.Count -gt 0) { "$($p.Conditions.Applications.IncludeApplications.Count) app(s)" }
+                      else   { "Selected" }
+
+        $stateColor = switch ($p.State) {
+            "enabled"                           { "#107c10" }
+            "enabledForReportingButNotEnforced" { "#d83b01" }
+            default                             { "#828282" }
+        }
+        $stateLabel = switch ($p.State) {
+            "enabled"                           { "Enabled" }
+            "enabledForReportingButNotEnforced" { "Report Only" }
+            "disabled"                          { "Disabled" }
+            default                             { $p.State }
+        }
+        $created  = if ($p.CreatedDateTime)  { ([datetime]$p.CreatedDateTime).ToString("yyyy-MM-dd")  } else { "" }
+        $modified = if ($p.ModifiedDateTime) { ([datetime]$p.ModifiedDateTime).ToString("yyyy-MM-dd") } else { "" }
+
+        $caRows += "<tr>"
+        $caRows += "<td>$([System.Web.HttpUtility]::HtmlEncode($p.DisplayName))</td>"
+        $caRows += "<td><span style='color:$stateColor;font-weight:600'>$stateLabel</span></td>"
+        $caRows += "<td>$([System.Web.HttpUtility]::HtmlEncode($usersScope))</td>"
+        $caRows += "<td>$([System.Web.HttpUtility]::HtmlEncode($appsScope))</td>"
+        $caRows += "<td>$([System.Web.HttpUtility]::HtmlEncode($grantText))</td>"
+        $caRows += "<td>$created</td><td>$modified</td></tr>`n"
+    }
+    "<table id='ca-table'><thead><tr>" +
+    "<th onclick=""sort('ca-table',0)"">Policy &#8597;</th>" +
+    "<th onclick=""sort('ca-table',1)"">State &#8597;</th>" +
+    "<th>Users</th><th>Apps</th><th>Grant Controls</th>" +
+    "<th onclick=""sort('ca-table',5)"">Created &#8597;</th>" +
+    "<th onclick=""sort('ca-table',6)"">Modified &#8597;</th>" +
+    "</tr></thead><tbody>$caRows</tbody></table>"
+}
 
 # Devices
 $aadByOs = $aadDevices | Group-Object OperatingSystem | Sort-Object Count -Descending
@@ -955,8 +1058,35 @@ if ($aadDeviceError) {
 } else {
     $devOsHtml = "<p class='empty'>No Azure AD device records found.</p>"
 }
+# Intune compliance breakdown
+$intuneCompliant    = @($intuneDevices | Where-Object { $_.complianceState -eq "compliant" })
+$intuneNonCompliant = @($intuneDevices | Where-Object { $_.complianceState -eq "noncompliant" })
+$intuneUnknown      = @($intuneDevices | Where-Object { $_.complianceState -notin @("compliant","noncompliant") })
+
+$intuneComplianceHtml = ""
+if ($intuneDevices.Count -gt 0 -and -not $intuneError) {
+    $ncColor = if ($intuneNonCompliant.Count -gt 0) { "#e81123" } else { "#107c10" }
+    $intuneComplianceHtml = "<h3>Intune Compliance</h3><div class='stat-grid'>" +
+        (New-StatCard "Compliant"     $intuneCompliant.Count    "#107c10") +
+        (New-StatCard "Non-Compliant" $intuneNonCompliant.Count $ncColor)  +
+        (New-StatCard "Unknown"       $intuneUnknown.Count      "#797775") +
+        "</div>"
+
+    if ($intuneNonCompliant.Count -gt 0) {
+        $ncRows = ($intuneNonCompliant | ForEach-Object {
+            "<tr><td>$([System.Web.HttpUtility]::HtmlEncode($_.deviceName))</td>" +
+            "<td>$([System.Web.HttpUtility]::HtmlEncode($_.operatingSystem))</td>" +
+            "<td><span style='color:#e81123;font-weight:600'>Non-Compliant</span></td></tr>"
+        }) -join ""
+        $intuneComplianceHtml += "<h3>Non-Compliant Devices</h3>" +
+            "<table><thead><tr><th>Device</th><th>OS</th><th>State</th></tr></thead><tbody>$ncRows</tbody></table>"
+    } else {
+        $intuneComplianceHtml += "<p class='ok' style='margin-top:8px'>&#10003; All enrolled devices are compliant.</p>"
+    }
+}
+
 $devIntuneNote = if ($intuneError) { "<p class='warning' style='margin-top:8px'>&#9888; $([System.Web.HttpUtility]::HtmlEncode($intuneError))</p>" } else { "" }
-$devicesHtml   = $devCardsHtml + $devOsHtml + $devIntuneNote
+$devicesHtml   = $devCardsHtml + $devOsHtml + $intuneComplianceHtml + $devIntuneNote
 
 # EXO
 $exoHtml = if ($exoError) { "<p class='warning'>&#9888; $([System.Web.HttpUtility]::HtmlEncode($exoError))</p>" }
@@ -1190,11 +1320,11 @@ $reportHeaderHtml = if ($IverBranding) {
 
 $reportFooterHtml = if ($IverBranding) {
 @"
-<footer>${footerLogoHtml}Get-CustomerReport.ps1 v1.3.6 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\<br><small style="opacity:.6">&copy; $(Get-Date -Format 'yyyy') Iver Managed Services</small></footer>
+<footer>${footerLogoHtml}Get-CustomerReport.ps1 v1.4.0 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\<br><small style="opacity:.6">&copy; $(Get-Date -Format 'yyyy') Iver Managed Services</small></footer>
 "@
 } else {
 @"
-<footer>Get-CustomerReport.ps1 v1.3.6 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\</footer>
+<footer>Get-CustomerReport.ps1 v1.4.0 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\</footer>
 "@
 }
 
@@ -1245,15 +1375,15 @@ function sort(tId,col){
 <![endif]-->
 $reportHeaderHtml
 <nav>
-  <a href="#findings">&#128680; Key Findings</a>
-  <a href="#tenant">&#127970; Tenant</a>
-  <a href="#licenses">&#128196; Licenses</a>
-  <a href="#users">&#128101; Users</a>
-  <a href="#admins">&#128272; Admins</a>
-  <a href="#groups">&#128101; Groups</a>
-  <a href="#ca">&#128274; Conditional Access</a>
-  <a href="#devices">&#128187; Devices</a>
-  <a href="#exchange">&#128231; Exchange Online</a>
+  <a href="#findings">$siFindings Key Findings</a>
+  <a href="#tenant">$siTenant Tenant</a>
+  <a href="#licenses">$siLicenses Licenses</a>
+  <a href="#users">$siUsers Users</a>
+  <a href="#admins">$siAdmins Admins</a>
+  <a href="#groups">$siGroups Groups</a>
+  <a href="#ca">$siCA Conditional Access</a>
+  <a href="#devices">$siDevices Devices</a>
+  <a href="#exchange">$siExchange Exchange Online</a>
 </nav>
 <main>
 
@@ -1274,17 +1404,31 @@ $reportHeaderHtml
 
 <div class="section" id="licenses">
   <h2>$siLicenses Subscriptions &amp; Licenses</h2>
-  <table id="sku-table">
+  <h3>Paid Subscriptions</h3>
+  <table id="sku-paid-table">
     <thead><tr>
-      <th onclick="sort('sku-table',0)">SKU &#8597;</th>
-      <th onclick="sort('sku-table',1)">Name &#8597;</th>
-      <th onclick="sort('sku-table',2)">Status &#8597;</th>
-      <th onclick="sort('sku-table',3)">Purchased &#8597;</th>
-      <th onclick="sort('sku-table',4)">Assigned &#8597;</th>
-      <th onclick="sort('sku-table',5)">Available &#8597;</th>
-      <th onclick="sort('sku-table',6)">Renewal Date &#8597;</th>
+      <th onclick="sort('sku-paid-table',0)">SKU &#8597;</th>
+      <th onclick="sort('sku-paid-table',1)">Name &#8597;</th>
+      <th onclick="sort('sku-paid-table',2)">Status &#8597;</th>
+      <th onclick="sort('sku-paid-table',3)">Purchased &#8597;</th>
+      <th onclick="sort('sku-paid-table',4)">Assigned &#8597;</th>
+      <th onclick="sort('sku-paid-table',5)">Available &#8597;</th>
+      <th onclick="sort('sku-paid-table',6)">Renewal Date &#8597;</th>
     </tr></thead>
-    <tbody>$subRowsHtml</tbody>
+    <tbody>$paidRowsHtml</tbody>
+  </table>
+  <h3 style="margin-top:24px">Free &amp; Auto-provisioned</h3>
+  <table id="sku-free-table">
+    <thead><tr>
+      <th onclick="sort('sku-free-table',0)">SKU &#8597;</th>
+      <th onclick="sort('sku-free-table',1)">Name &#8597;</th>
+      <th onclick="sort('sku-free-table',2)">Status &#8597;</th>
+      <th onclick="sort('sku-free-table',3)">Seats &#8597;</th>
+      <th onclick="sort('sku-free-table',4)">Assigned &#8597;</th>
+      <th onclick="sort('sku-free-table',5)">Available &#8597;</th>
+      <th>Renewal Date</th>
+    </tr></thead>
+    <tbody>$freeRowsHtml</tbody>
   </table>
   $subNoteHtml
 </div>
