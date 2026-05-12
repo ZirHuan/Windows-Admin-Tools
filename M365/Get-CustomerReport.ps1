@@ -30,7 +30,7 @@
     .\Get-CustomerReport.ps1 -TenantId "contoso.com" -AdminUPN "admin@contoso.com" -TenantName "Contoso"
 .NOTES
     Authors:  Rosvall & Claude
-    Version:  1.4.0
+    Version:  1.5.0
     Changelog:
         1.0.0 - Initial release
         1.1.0 - Fix IsExternal to check all verified tenant domains (not only primary)
@@ -72,6 +72,11 @@
               - Intune compliance breakdown: Compliant / Non-Compliant / Unknown stat cards + non-compliant device list
               - Nav bar icons use branded PNGs when -IverBranding active (same Ikoner\ source as section headings)
               - New findings: Global Admin count > 3 (MEDIUM); licensed users with password age > 365 days (MEDIUM)
+        1.5.0 - Delta / comparison section: auto-detects previous run in <shortname>.source\ and shows
+                metric changes (Licensed, Guests, No MFA, Inactive, Pwd >1yr, CA policies, Non-compliant devices, Secure Score)
+              - SVG grouped bar chart comparing previous vs current for key risk metrics
+              - SVG Secure Score trend line shown when 3+ historical runs available
+              - Changes tab added to nav bar
 #>
 
 [CmdletBinding()]
@@ -1106,6 +1111,196 @@ $exoHtml = if ($exoError) { "<p class='warning'>&#9888; $([System.Web.HttpUtilit
                "<h3>Outbound Connectors</h3>" + ($exoOutbound | ConvertTo-HtmlTable)
            }
 
+# ── DELTA / COMPARISON ────────────────────────────────────────────────────────
+$deltaHtml  = ""
+$sourceBase = Join-Path $OutputPath "$shortName.source"
+$allRuns    = @()
+if (Test-Path $sourceBase) {
+    $allRuns = @(Get-ChildItem -Path $sourceBase -Directory |
+        Where-Object { $_.Name -match '^\d{8}_\d{4}$' } |
+        Sort-Object Name |
+        Select-Object -ExpandProperty Name)
+}
+
+if ($allRuns.Count -ge 2) {
+    $prevTimestamp = $allRuns | Where-Object { $_ -lt $sourceTimestamp } | Select-Object -Last 1
+
+    if ($prevTimestamp) {
+        $prevDir = Join-Path $sourceBase $prevTimestamp
+        try {
+            # Load previous run data (users.json saves $processedUsers — same object shape)
+            $prevUsers   = @(if (Test-Path "$prevDir\users.json")         { Get-Content "$prevDir\users.json"         -Raw | ConvertFrom-Json } else { @() })
+            $prevScore   =   if (Test-Path "$prevDir\secureScore.json")   { Get-Content "$prevDir\secureScore.json"   -Raw | ConvertFrom-Json } else { $null }
+            $prevCaPols  = @(if (Test-Path "$prevDir\caPolicies.json")    { Get-Content "$prevDir\caPolicies.json"    -Raw | ConvertFrom-Json } else { @() })
+            $prevDevices = @(if (Test-Path "$prevDir\intuneDevices.json") { Get-Content "$prevDir\intuneDevices.json" -Raw | ConvertFrom-Json } else { @() })
+
+            # Previous metrics
+            $prevLicensed  = @($prevUsers  | Where-Object { $_.IsLicensed }).Count
+            $prevGuests    = @($prevUsers  | Where-Object { $_.UserType -eq 'Guest' }).Count
+            $prevNoMfa     = @($prevUsers  | Where-Object { $_.IsLicensed -and $_.Enabled -and $_.MfaRegistered -eq $false }).Count
+            $prevInactive  = @($prevUsers  | Where-Object { $_.IsLicensed -and $_.Enabled -and $_.IsInactive }).Count
+            $prevOldPwd    = @($prevUsers  | Where-Object { $_.IsLicensed -and $_.Enabled -and $_.PasswordAge -gt 365 }).Count
+            $prevEnabledCA = @($prevCaPols | Where-Object { $_.State -eq 'enabled' }).Count
+            $prevNonCompl  = @($prevDevices| Where-Object { $_.complianceState -eq 'noncompliant' }).Count
+            $prevSSPct     = if ($prevScore -and $prevScore.maxScore -gt 0) {
+                                 [math]::Round($prevScore.currentScore / $prevScore.maxScore * 100, 1)
+                             } else { 0 }
+
+            # Current metrics
+            $currLicensed  = @($processedUsers | Where-Object { $_.IsLicensed }).Count
+            $currGuests    = @($processedUsers | Where-Object { $_.UserType -eq 'Guest' }).Count
+            $currNoMfa     = if ($mfaData.Count -gt 0) { @($processedUsers | Where-Object { $_.IsLicensed -and $_.Enabled -and $_.MfaRegistered -eq $false }).Count } else { 0 }
+            $currInactive  = if ($signInAvailable)     { @($processedUsers | Where-Object { $_.IsLicensed -and $_.Enabled -and $_.IsInactive }).Count } else { 0 }
+            $currOldPwd    = @($processedUsers | Where-Object { $_.IsLicensed -and $_.Enabled -and $_.PasswordAge -gt 365 }).Count
+            $currEnabledCA = @($caPolicies   | Where-Object { $_.State -eq 'enabled' }).Count
+            $currNonCompl  = if ($intuneDevices) { @($intuneDevices | Where-Object { $_.complianceState -eq 'noncompliant' }).Count } else { 0 }
+            $currSSPct     = if ($secureScore -and $secureScore.maxScore -gt 0) {
+                                 [math]::Round($secureScore.currentScore / $secureScore.maxScore * 100, 1)
+                             } else { 0 }
+
+            # Delta card builder: returns an HTML card for one metric
+            function New-DeltaCard {
+                param(
+                    [string]$Label,
+                    [double]$Prev,
+                    [double]$Curr,
+                    [ValidateSet('lower-better','higher-better','neutral')]
+                    [string]$Direction = 'lower-better',
+                    [string]$Suffix = ""
+                )
+                $diff  = $Curr - $Prev
+                $sign  = if ($diff -gt 0) { "+" } else { "" }
+                $class = if ($diff -eq 0)                             { "delta-neutral" }
+                         elseif ($Direction -eq 'lower-better')  { if ($diff -lt 0) { "delta-better" } else { "delta-worse" } }
+                         elseif ($Direction -eq 'higher-better') { if ($diff -gt 0) { "delta-better" } else { "delta-worse" } }
+                         else                                         { "delta-neutral" }
+                $dp = if ($Suffix) { "${Prev}${Suffix}" } else { [int]$Prev }
+                $dc = if ($Suffix) { "${Curr}${Suffix}" } else { [int]$Curr }
+                $dd = if ($Suffix) { "${sign}$([math]::Round($diff,1))${Suffix}" } else { "${sign}$([int]$diff)" }
+                return "<div class='delta-card $class'><div class='delta-label'>$Label</div><div class='delta-values'><span class='delta-prev'>$dp</span><span class='delta-arrow'>&nbsp;&#8594;&nbsp;</span><span class='delta-curr'>$dc</span></div><span class='delta-change'>$dd</span></div>"
+            }
+
+            $deltaCards  = "<div class='delta-grid'>"
+            $deltaCards += New-DeltaCard "Licensed Users"        $prevLicensed  $currLicensed  'higher-better'
+            $deltaCards += New-DeltaCard "Guest Accounts"        $prevGuests    $currGuests    'neutral'
+            $deltaCards += New-DeltaCard "No MFA"                $prevNoMfa     $currNoMfa     'lower-better'
+            $deltaCards += New-DeltaCard "Inactive Users"        $prevInactive  $currInactive  'lower-better'
+            $deltaCards += New-DeltaCard "Password &gt;1 Year"   $prevOldPwd    $currOldPwd    'lower-better'
+            $deltaCards += New-DeltaCard "Enabled CA Policies"   $prevEnabledCA $currEnabledCA 'higher-better'
+            $deltaCards += New-DeltaCard "Non-Compliant Devices" $prevNonCompl  $currNonCompl  'lower-better'
+            $deltaCards += New-DeltaCard "Secure Score"          $prevSSPct     $currSSPct     'higher-better' '%'
+            $deltaCards += "</div>"
+
+            # SVG grouped bar chart: prev (gray) vs curr (colored) for key risk metrics
+            function New-SvgBarChart {
+                param([array]$Metrics, [int]$Width = 560, [int]$Height = 220)
+                $n = $Metrics.Count
+                $pL = 44; $pR = 16; $pT = 20; $pB = 52
+                $cW = $Width - $pL - $pR; $cH = $Height - $pT - $pB
+                $maxV = ($Metrics | ForEach-Object { [math]::Max($_.Prev, $_.Curr) } | Measure-Object -Maximum).Maximum
+                if ($maxV -le 0) { $maxV = 1 }
+                $gW = $cW / $n; $bW = [math]::Min(26, $gW * 0.34)
+
+                $bars = ""; $xlbls = ""
+                for ($i = 0; $i -lt $n; $i++) {
+                    $m   = $Metrics[$i]
+                    $gx  = $pL + $i * $gW + $gW / 2
+                    $x1  = [int]($gx - $bW - 2); $x2 = [int]($gx + 2)
+                    $h1  = [math]::Max(2, [int]($m.Prev / $maxV * $cH))
+                    $h2  = [math]::Max(2, [int]($m.Curr / $maxV * $cH))
+                    $y1  = $pT + $cH - $h1; $y2 = $pT + $cH - $h2
+                    $ok  = if ($m.LowerBetter) { $m.Curr -lt $m.Prev } else { $m.Curr -gt $m.Prev }
+                    $bad = if ($m.LowerBetter) { $m.Curr -gt $m.Prev } else { $m.Curr -lt $m.Prev }
+                    $col = if ($ok) { "#4CAF50" } elseif ($bad) { "#F44336" } else { "#888" }
+                    $ib  = [int]$bW
+
+                    $bars += "<rect x='$x1' y='$y1' width='$ib' height='$h1' fill='#888' opacity='.45' rx='2'/>"
+                    $bars += "<rect x='$x2' y='$y2' width='$ib' height='$h2' fill='$col' rx='2'/>"
+                    if ($m.Prev -gt 0) { $bars += "<text x='$([int]($x1+$ib/2))' y='$([int]($y1-3))' text-anchor='middle' font-size='10' fill='#888'>$([int]$m.Prev)</text>" }
+                    if ($m.Curr -gt 0) { $bars += "<text x='$([int]($x2+$ib/2))' y='$([int]($y2-3))' text-anchor='middle' font-size='10' fill='$col'>$([int]$m.Curr)</text>" }
+                    $xlbls += "<text x='$([int]$gx)' y='$($pT+$cH+16)' text-anchor='middle' font-size='10' fill='currentColor'>$($m.Label)</text>"
+                }
+
+                # Y-axis guide lines
+                $grid = ""; for ($t = 1; $t -le 4; $t++) {
+                    $tv = [math]::Round($maxV * $t / 4); $ty = $pT + $cH - [int]($tv / $maxV * $cH)
+                    $grid += "<line x1='$pL' x2='$($pL+$cW)' y1='$ty' y2='$ty' stroke='currentColor' stroke-opacity='.12' stroke-width='1'/>"
+                    $grid += "<text x='$($pL-4)' y='$($ty+4)' text-anchor='end' font-size='10' fill='currentColor'>$tv</text>"
+                }
+                $legY = $pT + $cH + 32
+                $leg  = "<rect x='$pL' y='$legY' width='11' height='9' fill='#888' opacity='.45' rx='2'/><text x='$($pL+15)' y='$($legY+8)' font-size='10' fill='currentColor'>Previous</text>"
+                $leg += "<rect x='$($pL+74)' y='$legY' width='11' height='9' fill='#4CAF50' rx='2'/><text x='$($pL+89)' y='$($legY+8)' font-size='10' fill='currentColor'>Better</text>"
+                $leg += "<rect x='$($pL+136)' y='$legY' width='11' height='9' fill='#F44336' rx='2'/><text x='$($pL+151)' y='$($legY+8)' font-size='10' fill='currentColor'>Worse</text>"
+                return "<svg width='$Width' height='$($Height+20)' viewBox='0 0 $Width $($Height+20)' style='max-width:100%;display:block' role='img'>$grid$bars$xlbls$leg</svg>"
+            }
+
+            $chartMetrics = @(
+                [PSCustomObject]@{ Label="No MFA";     Prev=$prevNoMfa;    Curr=$currNoMfa;    LowerBetter=$true }
+                [PSCustomObject]@{ Label="Inactive";   Prev=$prevInactive; Curr=$currInactive; LowerBetter=$true }
+                [PSCustomObject]@{ Label="Pwd >1yr";   Prev=$prevOldPwd;   Curr=$currOldPwd;   LowerBetter=$true }
+                [PSCustomObject]@{ Label="Non-Compl."; Prev=$prevNonCompl; Curr=$currNonCompl; LowerBetter=$true }
+            )
+            $barSvg = New-SvgBarChart -Metrics $chartMetrics
+
+            # Secure Score trend line (shown when 3+ historical runs exist)
+            $trendSvg = ""
+            if ($allRuns.Count -ge 3) {
+                $trendPoints = @()
+                foreach ($runTs in $allRuns) {
+                    $scorePath = Join-Path $sourceBase "$runTs\secureScore.json"
+                    if (Test-Path $scorePath) {
+                        $sc = Get-Content $scorePath -Raw | ConvertFrom-Json
+                        if ($sc -and $sc.maxScore -gt 0) {
+                            $trendPoints += [PSCustomObject]@{
+                                Label = "$($runTs.Substring(4,2))-$($runTs.Substring(6,2))"
+                                Pct   = [math]::Round($sc.currentScore / $sc.maxScore * 100, 1)
+                            }
+                        }
+                    }
+                }
+                if ($trendPoints.Count -ge 3) {
+                    $tw = 560; $th = 160; $tpL = 44; $tpR = 16; $tpT = 16; $tpB = 40
+                    $tcW = $tw - $tpL - $tpR; $tcH = $th - $tpT - $tpB
+                    $minP = [math]::Max(0,  ($trendPoints | Measure-Object Pct -Minimum).Minimum - 8)
+                    $maxP = [math]::Min(100, ($trendPoints | Measure-Object Pct -Maximum).Maximum + 8)
+                    $rng  = $maxP - $minP; if ($rng -le 0) { $rng = 10 }
+                    $pts  = @()
+                    for ($i = 0; $i -lt $trendPoints.Count; $i++) {
+                        $px = $tpL + [int]($i / [math]::Max(1, $trendPoints.Count - 1) * $tcW)
+                        $py = $tpT + [int]($tcH - ($trendPoints[$i].Pct - $minP) / $rng * $tcH)
+                        $pts += [PSCustomObject]@{ X=$px; Y=$py; Pct=$trendPoints[$i].Pct; Lbl=$trendPoints[$i].Label }
+                    }
+                    $poly  = ($pts | ForEach-Object { "$($_.X),$($_.Y)" }) -join " "
+                    $dots  = ($pts | ForEach-Object { "<circle cx='$($_.X)' cy='$($_.Y)' r='4' fill='#0078d4'><title>$($_.Lbl): $($_.Pct)%</title></circle>" }) -join ""
+                    $xlbl  = ($pts | ForEach-Object { "<text x='$($_.X)' y='$($tpT+$tcH+14)' text-anchor='middle' font-size='10' fill='currentColor'>$($_.Lbl)</text>" }) -join ""
+                    $tgrid = ""; for ($t = 0; $t -le 3; $t++) {
+                        $tv = [math]::Round($minP + $rng * $t / 3)
+                        $ty = $tpT + [int]($tcH - ($tv - $minP) / $rng * $tcH)
+                        $tgrid += "<line x1='$tpL' x2='$($tpL+$tcW)' y1='$ty' y2='$ty' stroke='currentColor' stroke-opacity='.12' stroke-width='1'/>"
+                        $tgrid += "<text x='$($tpL-4)' y='$($ty+4)' text-anchor='end' font-size='10' fill='currentColor'>${tv}%</text>"
+                    }
+                    $trendSvg = "<h3 style='margin-top:20px'>Secure Score Trend</h3><div class='delta-chart'><svg width='$tw' height='$th' viewBox='0 0 $tw $th' style='max-width:100%;display:block' role='img'>$tgrid<polyline points='$poly' fill='none' stroke='#0078d4' stroke-width='2'/>$dots$xlbl</svg></div>"
+                }
+            }
+
+            # Format timestamps for display
+            $pf = "$($prevTimestamp.Substring(0,4))-$($prevTimestamp.Substring(4,2))-$($prevTimestamp.Substring(6,2)) $($prevTimestamp.Substring(9,2)):$($prevTimestamp.Substring(11,2))"
+            $cf = "$($sourceTimestamp.Substring(0,4))-$($sourceTimestamp.Substring(4,2))-$($sourceTimestamp.Substring(6,2)) $($sourceTimestamp.Substring(9,2)):$($sourceTimestamp.Substring(11,2))"
+            $deltaHtml  = "<p class='delta-meta'>Comparing <strong>$pf</strong> (previous) &rarr; <strong>$cf</strong> (this report) &nbsp;&bull;&nbsp; $($allRuns.Count) total runs</p>"
+            $deltaHtml += $deltaCards
+            $deltaHtml += "<h3>Risk Metrics Comparison</h3><div class='delta-chart'>$barSvg</div>"
+            $deltaHtml += $trendSvg
+        } catch {
+            Write-Warning "Delta comparison failed: $_"
+            $deltaHtml = "<p class='warning'>&#9888; Could not generate comparison: $([System.Web.HttpUtility]::HtmlEncode($_.Exception.Message))</p>"
+        }
+    } else {
+        $deltaHtml = "<p class='na'>Only one run detected (no older run to compare against).</p>"
+    }
+} else {
+    $deltaHtml = "<p class='na'>No previous report found in <code>$shortName.source\</code>. Run this report again later to see a delta comparison.</p>"
+}
+
 # ── ASSEMBLE HTML ─────────────────────────────────────────────────────────────
 $reportDate = Get-Date -Format "yyyy-MM-dd HH:mm"
 $highCount  = ($findings | Where-Object { $_.Severity -eq "HIGH" }).Count
@@ -1132,12 +1327,14 @@ if ($IverBranding) {
 $siFindings = "&#128680;"; $siTenant = "&#127970;"; $siLicenses = "&#128196;"
 $siUsers    = "&#128101;"; $siAdmins  = "&#128272;"; $siGroups   = "&#128101;"
 $siCA       = "&#128274;"; $siDevices = "&#128187;"; $siExchange = "&#128231;"
+$siDelta    = "&#128200;"
 if ($IverBranding) {
     $iconDir = Join-Path $PSScriptRoot "Ikoner"
     $siDefs = [ordered]@{
         siFindings = 'warning.png'; siTenant = 'globe.png';    siLicenses = 'box.png'
         siUsers    = 'user.png';    siAdmins = 'key.png';      siGroups   = 'group.png'
         siCA       = 'shield.png';  siDevices = 'laptop.png';  siExchange = 'discussion.png'
+        siDelta    = 'chart.png'
     }
     foreach ($entry in $siDefs.GetEnumerator()) {
         $iconPath = Join-Path $iconDir $entry.Value
@@ -1222,6 +1419,22 @@ tr:last-child td{border-bottom:none}
 .legend-item{display:flex;align-items:center;gap:6px}
 .ldot{width:12px;height:12px;border-radius:2px;flex-shrink:0}
 footer{text-align:center;padding:20px;color:#A0A0A0;font-size:12px;border-top:1px solid #505050}
+.delta-meta{font-size:12px;color:#A0A0A0;margin-bottom:16px}
+.delta-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-bottom:20px}
+.delta-card{background:rgba(255,255,255,0.06);border-radius:4px;padding:14px 16px;border:1px solid rgba(130,130,130,0.3)}
+.delta-label{font-size:11px;color:#A0A0A0;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.delta-values{display:flex;align-items:baseline;gap:4px;margin-bottom:6px;flex-wrap:wrap}
+.delta-prev{font-size:16px;font-weight:600;color:#808080}
+.delta-arrow{color:#606060;font-size:13px}
+.delta-curr{font-size:22px;font-weight:700}
+.delta-change{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700}
+.delta-better .delta-curr{color:#4CAF50}
+.delta-better .delta-change{background:rgba(76,175,80,0.15);color:#4CAF50}
+.delta-worse  .delta-curr{color:#F44336}
+.delta-worse  .delta-change{background:rgba(244,67,54,0.15);color:#F44336}
+.delta-neutral .delta-curr{color:#FCDE06}
+.delta-neutral .delta-change{background:rgba(252,222,6,0.1);color:#A0A0A0}
+.delta-chart{margin:12px 0 4px}
 @media print{body{background:white;color:black}header{background:white;border-bottom:2px solid black}nav{display:none}.section{border:1px solid #ccc;background:white}.section h2,.stat-value,th{color:black!important}td{color:black!important}th{border-bottom:1px solid black}.si{filter:none;opacity:.6}}
 </style>
 "@
@@ -1298,6 +1511,22 @@ tr:last-child td{border-bottom:none}
 .legend-item{display:flex;align-items:center;gap:6px}
 .ldot{width:12px;height:12px;border-radius:2px;flex-shrink:0}
 footer{text-align:center;padding:20px;color:#605e5c;font-size:12px}
+.delta-meta{font-size:12px;color:#605e5c;margin-bottom:16px}
+.delta-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-bottom:20px}
+.delta-card{background:#faf9f8;border-radius:4px;padding:14px 16px;border:1px solid #edebe9}
+.delta-label{font-size:11px;color:#605e5c;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.delta-values{display:flex;align-items:baseline;gap:4px;margin-bottom:6px;flex-wrap:wrap}
+.delta-prev{font-size:16px;font-weight:600;color:#a0a0a0}
+.delta-arrow{color:#bbb;font-size:13px}
+.delta-curr{font-size:22px;font-weight:700}
+.delta-change{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:700}
+.delta-better .delta-curr{color:#107c10}
+.delta-better .delta-change{background:#dff6dd;color:#107c10}
+.delta-worse  .delta-curr{color:#e81123}
+.delta-worse  .delta-change{background:#fde7e9;color:#e81123}
+.delta-neutral .delta-curr{color:#323130}
+.delta-neutral .delta-change{background:#f3f2f1;color:#605e5c}
+.delta-chart{margin:12px 0 4px}
 </style>
 "@
 }
@@ -1321,11 +1550,11 @@ $reportHeaderHtml = if ($IverBranding) {
 
 $reportFooterHtml = if ($IverBranding) {
 @"
-<footer>${footerLogoHtml}Get-CustomerReport.ps1 v1.4.0 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\<br><small style="opacity:.6">&copy; $(Get-Date -Format 'yyyy') Iver Managed Services</small></footer>
+<footer>${footerLogoHtml}Get-CustomerReport.ps1 v1.5.0 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\<br><small style="opacity:.6">&copy; $(Get-Date -Format 'yyyy') Iver Managed Services</small></footer>
 "@
 } else {
 @"
-<footer>Get-CustomerReport.ps1 v1.4.0 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\</footer>
+<footer>Get-CustomerReport.ps1 v1.5.0 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\</footer>
 "@
 }
 
@@ -1385,6 +1614,7 @@ $reportHeaderHtml
   <a href="#ca">$siCA Conditional Access</a>
   <a href="#devices">$siDevices Devices</a>
   <a href="#exchange">$siExchange Exchange Online</a>
+  <a href="#delta">$siDelta Changes</a>
 </nav>
 <main>
 
@@ -1489,6 +1719,11 @@ $reportHeaderHtml
 <div class="section" id="exchange">
   <h2>$siExchange Exchange Online</h2>
   $exoHtml
+</div>
+
+<div class="section" id="delta">
+  <h2>$siDelta Changes Since Last Report</h2>
+  $deltaHtml
 </div>
 
 </main>
