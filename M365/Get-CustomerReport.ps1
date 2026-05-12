@@ -468,7 +468,8 @@ foreach ($role in $roles) {
 }
 
 Write-Host "[INFO] Collecting groups..." -ForegroundColor Cyan
-$groups = Get-MgGroup -All -Property DisplayName,GroupTypes,SecurityEnabled,MailEnabled,MembershipRule,CreatedDateTime
+$groups = Get-MgGroup -All -Property DisplayName,GroupTypes,SecurityEnabled,MailEnabled,MembershipRule,CreatedDateTime |
+    Select-Object DisplayName, GroupTypes, SecurityEnabled, MailEnabled, MembershipRule, CreatedDateTime
 
 Write-Host "[INFO] Collecting Conditional Access policies..." -ForegroundColor Cyan
 $caPolicies = @()
