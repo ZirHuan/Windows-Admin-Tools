@@ -6,7 +6,7 @@
     renewal dates, users with MFA/sign-in/password age, Secure Score, and devices.
 .PARAMETER CustomersFile
     Path to a customers.json file. Defaults to customers.json in the script folder.
-    Point at a customer subfolder (e.g. ".\naturskog.se\customers.json") to auto-select
+    Point at a customer subfolder (e.g. ".\contoso.onmicrosoft.com\customers.json") to auto-select
     that customer without needing -Customer.
 .PARAMETER Customer
     Short name matching a profile in customers.json. Auto-selected if file has one entry.
@@ -23,9 +23,9 @@
 .PARAMETER SkipExchangeOnline
     Skip Exchange Online connection and data collection.
 .EXAMPLE
-    .\Get-CustomerReport.ps1 -CustomersFile ".\naturskog.se\customers.json"
+    .\Get-CustomerReport.ps1 -CustomersFile ".\contoso.onmicrosoft.com\customers.json"
 .EXAMPLE
-    .\Get-CustomerReport.ps1 -Customer antilopgroup
+    .\Get-CustomerReport.ps1 -Customer contoso
 .EXAMPLE
     .\Get-CustomerReport.ps1 -TenantId "contoso.com" -AdminUPN "admin@contoso.com" -TenantName "Contoso"
 .NOTES
@@ -62,7 +62,7 @@
                 embedded as base64 in header and footer (self-contained HTML, no external assets)
               - Requires Iver-BrandConfig.ps1 and iver-complete-neg.png alongside the script
         1.3.5 - Fix: -TenantId now matches by ShortName, TenantId field, or PrimaryDomain in
-                customers.json — so -TenantId "AntilopGroup" loads the profile and uses its
+                customers.json — so -TenantId "Contoso" loads the profile and uses its
                 real TenantId instead of passing the short name to Connect-MgGraph
         1.3.6 - IverBranding: replace emoji section icons with official Iver branded icons
                 (base64-embedded PNGs from Ikoner\ folder next to the script); falls back to
@@ -122,7 +122,7 @@ if (Test-Path $CustomersFile) {
         }
     } elseif ($TenantId) {
         # -TenantId passed — try to match by ShortName, TenantId field, or PrimaryDomain
-        # so that -TenantId "AntilopGroup" or -TenantId "antilopgroup.se" both load the profile
+        # so that -TenantId "Contoso" or -TenantId "contoso.com" both load the profile
         $matched = $profileList | Where-Object {
             $_.ShortName -ieq $TenantId -or $_.TenantId -ieq $TenantId -or $_.PrimaryDomain -ieq $TenantId
         }

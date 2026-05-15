@@ -7,14 +7,14 @@
     Requires AuditLog.Read.All scope — will prompt to reconnect if missing.
     Supports -Customer to load TenantId from customers.json, or supply -TenantId directly.
 .PARAMETER Customer
-    Short name of a customer profile in customers.json (e.g. "naturskog").
+    Short name of a customer profile in customers.json (e.g. "contoso").
     Loads TenantId automatically. Explicit -TenantId always overrides.
 .PARAMETER TenantId
     Entra ID Tenant ID or primary domain. Required if -Customer is not provided.
 .EXAMPLE
-    .\Get-CADeletionAudit.ps1 -Customer naturskog
+    .\Get-CADeletionAudit.ps1 -Customer contoso
 .EXAMPLE
-    .\Get-CADeletionAudit.ps1 -TenantId "b48eac82-6263-4586-b068-24f85bcb2d35"
+    .\Get-CADeletionAudit.ps1 -TenantId "00000000-0000-0000-0000-000000000000"
 #>
 
 [CmdletBinding()]

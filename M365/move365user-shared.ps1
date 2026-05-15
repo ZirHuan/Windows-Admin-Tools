@@ -24,7 +24,7 @@
     All actions are logged to a timestamped log file.
 
 .PARAMETER UserPrincipalName
-    UPN of the user being offboarded or restored (e.g., robin.lindberg@akerstedts.se).
+    UPN of the user being offboarded or restored (e.g., john.doe@contoso.com).
 
 .PARAMETER Customer
     Short name of a customer profile defined in customers.json (same directory as this script).
@@ -50,31 +50,31 @@
     connection will use the account's home tenant.
 
 .EXAMPLE
-    .\move365user-shared.ps1 -Customer akerstedts -UserPrincipalName "robin.lindberg@akerstedts.se"
+    .\move365user-shared.ps1 -Customer contoso -UserPrincipalName "john.doe@contoso.com"
 
-    Offboards Robin using the Åkerstedts customer profile (AdminUPN, TenantId, LicenseSku loaded automatically).
+    Offboards John using the Contoso customer profile (AdminUPN, TenantId, LicenseSku loaded automatically).
 
 .EXAMPLE
-    .\move365user-shared.ps1 -Customer akerstedts -UserPrincipalName "robin.lindberg@akerstedts.se" -WhatIf
+    .\move365user-shared.ps1 -Customer contoso -UserPrincipalName "john.doe@contoso.com" -WhatIf
 
     Dry run using customer profile — shows what would happen without making any changes.
 
 .EXAMPLE
-    .\move365user-shared.ps1 -Customer akerstedts -UserPrincipalName "robin.lindberg@akerstedts.se" `
+    .\move365user-shared.ps1 -Customer contoso -UserPrincipalName "john.doe@contoso.com" `
         -LicenseSkuPartNumber "M365BP"
 
-    Uses the Åkerstedts profile but overrides the default license SKU with M365BP.
+    Uses the Contoso profile but overrides the default license SKU with M365BP.
 
 .EXAMPLE
-    .\move365user-shared.ps1 -UserPrincipalName "robin.lindberg@akerstedts.se" `
-        -AdminUPN "adm.chrroses@akerstedts.se" -LicenseSkuPartNumber "SPB"
+    .\move365user-shared.ps1 -UserPrincipalName "john.doe@contoso.com" `
+        -AdminUPN "admin@contoso.com" -LicenseSkuPartNumber "SPB"
 
     Manual mode (no profile) — all values provided explicitly.
 
 .EXAMPLE
-    .\move365user-shared.ps1 -Customer akerstedts -UserPrincipalName "robin.lindberg@akerstedts.se" -Reverse
+    .\move365user-shared.ps1 -Customer contoso -UserPrincipalName "john.doe@contoso.com" -Reverse
 
-    Restores Robin using the Åkerstedts profile: assigns SPB license back, converts mailbox to Regular, re-enables sign-in.
+    Restores John using the Contoso profile: assigns SPB license back, converts mailbox to Regular, re-enables sign-in.
 
 .NOTES
     Modules required:
@@ -99,11 +99,11 @@
 
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
 param(
-    [Parameter(Mandatory, HelpMessage = "UPN of the target user, e.g. robin.lindberg@contoso.com")]
+    [Parameter(Mandatory, HelpMessage = "UPN of the target user, e.g. john.doe@contoso.com")]
     [ValidatePattern('^[^@\s]+@[^@\s]+\.[^@\s]+$')]
     [string]$UserPrincipalName,
 
-    [Parameter(HelpMessage = "Short name of a customer profile in customers.json (e.g. akerstedts)")]
+    [Parameter(HelpMessage = "Short name of a customer profile in customers.json (e.g. contoso)")]
     [string]$Customer,
 
     [Parameter(HelpMessage = "Admin UPN used to connect to Exchange Online. Optional when -Customer provides it.")]

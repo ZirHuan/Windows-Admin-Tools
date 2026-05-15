@@ -12,3 +12,5 @@ LicensedUsers-*.html
 *.tmp
 .DS_Store
 Thumbs.db
+
+tmp/
