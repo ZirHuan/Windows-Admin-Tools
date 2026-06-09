@@ -20,6 +20,8 @@
     Folder to save the HTML report. Defaults to .\<shortname>\ next to the script.
 .PARAMETER InactiveThresholdDays
     Days since last sign-in before a licensed user is flagged inactive. Default: 90.
+.PARAMETER OutputFormat
+    Output format. HTML (default) | PDF (converts HTML via Edge headless) | Markdown (.md) | JsonOnly (raw JSON only, no report).
 .PARAMETER SkipExchangeOnline
     Skip Exchange Online connection and data collection.
 .EXAMPLE
@@ -30,7 +32,7 @@
     .\Get-CustomerReport.ps1 -TenantId "contoso.com" -AdminUPN "admin@contoso.com" -TenantName "Contoso"
 .NOTES
     Authors:  Rosvall & Claude
-    Version:  1.5.0
+    Version:  1.5.3
     Changelog:
         1.0.0 - Initial release
         1.1.0 - Fix IsExternal to check all verified tenant domains (not only primary)
@@ -78,6 +80,17 @@
               - Delta cards: compare most recent previous run to current (green/red/neutral)
               - Sparkline grid: one mini trend chart per metric across full run history
               - Changes tab added to nav bar
+        1.5.1 - Fix: SKUs with PrepaidUnits.Enabled=0 but ConsumedUnits>0 (suspended/expired
+                subscriptions in grace period) were silently dropped from the license table.
+                Now included; displayed with red "0 ⚠" purchased and "Suspended" in available column
+        1.5.2 - Add -OutputFormat parameter: HTML (default), PDF (Edge headless), Markdown, JsonOnly
+                PDF: saves HTML then converts via msedge --headless --print-to-pdf; falls back to HTML
+                Markdown: GitHub-flavored .md with all major sections (findings, licenses, users, score, CA)
+                JsonOnly: saves raw source JSON files only — no report file generated
+        1.5.3 - Add -PrintFriendly switch: white/light CSS theme optimised for printing and PDF export
+                Pure white background, solid borders, high-contrast text, search/nav hidden at print time
+                @media print: color-adjust:exact so backgrounds/badges print correctly; page-break-inside:avoid on cards/findings
+                Compatible with -OutputFormat PDF for clean black-and-white or colour printouts
 #>
 
 [CmdletBinding()]
@@ -98,7 +111,12 @@ param(
     # Automatically disconnect from Graph and Exchange Online after completion without prompting
     [switch]$DisconnectAfter,
     # Apply Iver brand identity: dark theme, Iver yellow accents, logo embedded in header and footer
-    [switch]$IverBranding
+    [switch]$IverBranding,
+    # White print-friendly theme: solid borders, @media print rules, nav hidden on print, no shadows
+    [switch]$PrintFriendly,
+    # Output format: HTML (default) | PDF (Edge headless) | Markdown | JsonOnly (no report file)
+    [ValidateSet('HTML','PDF','Markdown','JsonOnly')]
+    [string]$OutputFormat = 'HTML'
 )
 
 # ── CUSTOMER PROFILE RESOLUTION ───────────────────────────────────────────────
@@ -215,7 +233,10 @@ function Build-SkuTableRows {
         $purchased  = $sku.PrepaidUnits.Enabled
         $consumed   = $sku.ConsumedUnits
         $available  = $purchased - $consumed
-        $availStyle = if ($available -gt 0 -and $purchased -gt 0 -and $purchased -lt 10000) { "style='color:#d83b01;font-weight:600'" } else { "" }
+        $suspended  = ($purchased -eq 0 -and $consumed -gt 0)
+        $availStyle = if ($suspended) { "style='color:#e81123;font-weight:600'" }
+                      elseif ($available -gt 0 -and $purchased -gt 0 -and $purchased -lt 10000) { "style='color:#d83b01;font-weight:600'" }
+                      else { "" }
         $sub        = $subLookup[$sku.SkuPartNumber]
         $renewDate  = "—"
         $renewStyle = ""
@@ -237,12 +258,121 @@ function Build-SkuTableRows {
         $html += "<td><small>$([System.Web.HttpUtility]::HtmlEncode($sku.SkuPartNumber))</small></td>"
         $html += "<td>$([System.Web.HttpUtility]::HtmlEncode($friendly))$isTrial</td>"
         $html += "<td><span style='color:$statusColor;font-weight:600'>$subStatus</span></td>"
-        $html += "<td>$purchased</td><td>$consumed</td>"
-        $html += "<td $availStyle>$available</td>"
+        $purchasedDisplay = if ($suspended) { "<span style='color:#e81123;font-weight:600'>0 &#9888;</span>" } else { $purchased }
+        $availableDisplay = if ($suspended) { "<span style='color:#e81123;font-weight:600'>Suspended</span>" } else { $available }
+        $html += "<td>$purchasedDisplay</td><td>$consumed</td>"
+        $html += "<td $availStyle>$availableDisplay</td>"
         $html += "<td $renewStyle>$renewDate</td>"
         $html += "</tr>`n"
     }
     return $html
+}
+
+function Build-MarkdownReport {
+    # Builds a Markdown version of the report from script-scope data variables.
+    # Must be called after all data collection and $paidSkuList/$freeSkuList are built.
+    $ts  = $today.ToString('yyyy-MM-dd HH:mm')
+    $md  = "# M365 Customer Report — $($org.DisplayName)`n"
+    $md += "_Generated: $ts_`n`n---`n`n"
+
+    # Key Findings
+    $md += "## Key Findings`n`n"
+    if ($findings.Count -eq 0) {
+        $md += "> No significant issues detected. Manual review still recommended.`n`n"
+    } else {
+        $severityOrder = @{ HIGH = 0; MEDIUM = 1; LOW = 2 }
+        $md += "| Severity | Finding | Action |`n|---|---|---|`n"
+        foreach ($f in ($findings | Sort-Object { $severityOrder[$_.Severity] })) {
+            $title  = $f.Title  -replace '\|', '\|'
+            $action = $f.Action -replace '\|', '\|'
+            $md += "| **$($f.Severity)** | $title | $action |`n"
+        }
+        $md += "`n"
+    }
+
+    # Tenant Overview
+    $md += "## Tenant Overview`n`n"
+    $md += "| Field | Value |`n|---|---|`n"
+    $md += "| Tenant ID | ``$($org.Id)`` |`n"
+    $md += "| Primary Domain | $primaryDomain |`n"
+    $md += "| Country | $($org.CountryLetterCode) |`n"
+    if ($org.CreatedDateTime) {
+        $md += "| Created | $(([datetime]$org.CreatedDateTime).ToString('yyyy-MM-dd')) |`n"
+    }
+    $md += "`n"
+
+    # Licenses — Paid
+    $md += "## Subscriptions & Licenses`n`n"
+    if ($paidSkuList.Count -gt 0) {
+        $md += "### Paid`n`n"
+        $md += "| SKU | Display Name | Status | Purchased | Consumed | Available | Renewal |`n|---|---|---|---|---|---|---|`n"
+        foreach ($sku in $paidSkuList) {
+            $n       = if ($licenseCatalog.ContainsKey($sku.SkuPartNumber)) { $licenseCatalog[$sku.SkuPartNumber] } else { $sku.SkuPartNumber }
+            $sub     = $subLookup[$sku.SkuPartNumber]
+            $st      = if ($sub) { $sub.status } else { '—' }
+            $avail   = $sku.PrepaidUnits.Enabled - $sku.ConsumedUnits
+            $availDisplay = if ($sku.PrepaidUnits.Enabled -eq 0 -and $sku.ConsumedUnits -gt 0) { '**Suspended**' } else { $avail }
+            $renewal = if ($sub -and $sub.nextLifecycleDateTime) { ([datetime]$sub.nextLifecycleDateTime).ToString('yyyy-MM-dd') } else { '—' }
+            $md += "| $($sku.SkuPartNumber) | $n | $st | $($sku.PrepaidUnits.Enabled) | $($sku.ConsumedUnits) | $availDisplay | $renewal |`n"
+        }
+        $md += "`n"
+    }
+
+    # Licenses — Free / Auto-provisioned
+    if ($freeSkuList.Count -gt 0) {
+        $md += "### Free / Auto-provisioned`n`n"
+        $md += "| SKU | Display Name | Consumed | Total |`n|---|---|---|---|`n"
+        foreach ($sku in $freeSkuList) {
+            $n = if ($licenseCatalog.ContainsKey($sku.SkuPartNumber)) { $licenseCatalog[$sku.SkuPartNumber] } else { $sku.SkuPartNumber }
+            $md += "| $($sku.SkuPartNumber) | $n | $($sku.ConsumedUnits) | $($sku.PrepaidUnits.Enabled) |`n"
+        }
+        $md += "`n"
+    }
+
+    # User Stats
+    $md += "## Users`n`n"
+    $inactiveStr    = if ($null -ne $userStats.Inactive)      { $userStats.Inactive }      else { 'N/A' }
+    $neverStr       = if ($null -ne $userStats.NeverSignedIn)  { $userStats.NeverSignedIn }  else { 'N/A' }
+    $noMfaStr       = if ($null -ne $userStats.NoMfa)          { $userStats.NoMfa }          else { 'N/A' }
+    $md += "| Total | Enabled | Disabled | Licensed | Guests | Inactive (>$InactiveThresholdDays d) | Never Signed In | No MFA |`n"
+    $md += "|---|---|---|---|---|---|---|---|`n"
+    $md += "| $($userStats.Total) | $($userStats.Enabled) | $($userStats.Disabled) | $($userStats.Licensed) | $($userStats.Guests) | $inactiveStr | $neverStr | $noMfaStr |`n`n"
+
+    $md += "| Display Name | UPN | Enabled | Type | Licenses | MFA | Last Sign-In | Password Age |`n"
+    $md += "|---|---|---|---|---|---|---|---|`n"
+    foreach ($u in ($processedUsers | Sort-Object DisplayName)) {
+        $licStr  = (($u.LicenseNames | Sort-Object -Unique) -join ', ') -replace '\|', '\|'
+        $mfaStr  = if ($null -eq $u.MfaRegistered) { 'N/A' } elseif ($u.MfaRegistered) { 'Yes' } else { 'No' }
+        $siStr   = if ($u.NeverSignedIn) { 'Never' } elseif ($u.LastSignIn) { $u.LastSignIn.ToString('yyyy-MM-dd') } else { 'N/A' }
+        $pwStr   = if ($null -eq $u.PasswordAge) { 'N/A' } else { "$($u.PasswordAge)d" }
+        $enStr   = if ($u.Enabled) { 'Yes' } else { 'No' }
+        $dn      = $u.DisplayName -replace '\|', '\|'
+        $upn     = $u.UPN         -replace '\|', '\|'
+        $md += "| $dn | $upn | $enStr | $($u.UserType) | $licStr | $mfaStr | $siStr | $pwStr |`n"
+    }
+    $md += "`n"
+
+    # Secure Score
+    if ($secureScore -and $secureScore.maxScore -gt 0) {
+        $pct = [math]::Round($secureScore.currentScore / $secureScore.maxScore * 100, 1)
+        $md += "## Secure Score`n`n"
+        $md += "**$([int]$secureScore.currentScore) / $([int]$secureScore.maxScore) ($pct%)**`n`n"
+    }
+
+    # Conditional Access
+    if ($caPolicies.Count -gt 0) {
+        $md += "## Conditional Access Policies`n`n"
+        $md += "| Name | State |`n|---|---|`n"
+        foreach ($ca in $caPolicies) {
+            $caName = $ca.DisplayName -replace '\|', '\|'
+            $md += "| $caName | $($ca.State) |`n"
+        }
+        $md += "`n"
+    } else {
+        $md += "## Conditional Access Policies`n`n_No CA policies configured._`n`n"
+    }
+
+    return $md
 }
 
 # ── MODULE CHECK ──────────────────────────────────────────────────────────────
@@ -863,13 +993,16 @@ $tenantInfoHtml += "</div>"
 $domainsHtml = $domains | ConvertTo-HtmlTable
 
 # License / Subscription tables — split paid vs free/auto-provisioned
+# Include SKUs where ConsumedUnits > 0 even if Enabled = 0 (suspended/expired subscriptions
+# still show assigned users in Graph but PrepaidUnits.Enabled drops to 0 during grace period)
 $paidSkuList = @($skus | Where-Object {
-    $_.PrepaidUnits.Enabled -gt 0 -and $_.PrepaidUnits.Enabled -lt 10000 -and
+    ($_.PrepaidUnits.Enabled -gt 0 -or $_.ConsumedUnits -gt 0) -and
+    $_.PrepaidUnits.Enabled -lt 10000 -and
     $_.SkuPartNumber -notmatch "FREE|VIRAL|EXPLORATORY"
 } | Sort-Object SkuPartNumber)
 
 $freeSkuList = @($skus | Where-Object {
-    $_.PrepaidUnits.Enabled -gt 0 -and
+    ($_.PrepaidUnits.Enabled -gt 0 -or $_.ConsumedUnits -gt 0) -and
     ($_.PrepaidUnits.Enabled -ge 10000 -or $_.SkuPartNumber -match "FREE|VIRAL|EXPLORATORY")
 } | Sort-Object SkuPartNumber)
 
@@ -1399,6 +1532,113 @@ footer{text-align:center;padding:20px;color:#A0A0A0;font-size:12px;border-top:1p
 @media print{body{background:white;color:black}header{background:white;border-bottom:2px solid black}nav{display:none}.section{border:1px solid #ccc;background:white}.section h2,.stat-value,th{color:black!important}td{color:black!important}th{border-bottom:1px solid black}.si{filter:none;opacity:.6}}
 </style>
 "@
+} elseif ($PrintFriendly) {
+@"
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#ffffff;color:#1a1a1a;font-size:13px}
+header{background:#ffffff;color:#1a1a1a;padding:20px 40px;border-bottom:3px solid #1a1a1a}
+header h1{font-size:20px;font-weight:700}
+header p{font-size:12px;color:#444;margin-top:4px}
+nav{background:#f5f5f5;border-bottom:1px solid #bbb;padding:0 32px;display:flex;gap:0;overflow-x:auto}
+nav a{display:block;padding:10px 14px;font-size:12px;font-weight:600;color:#333;text-decoration:none;border-bottom:2px solid transparent;white-space:nowrap}
+nav a:hover{color:#000;border-bottom-color:#000}
+main{max-width:1400px;margin:0 auto;padding:20px 40px}
+.section{background:#ffffff;border:1px solid #ccc;border-radius:2px;padding:20px;margin-bottom:14px}
+.section h2{font-size:15px;font-weight:700;color:#1a1a1a;margin-bottom:12px;padding-bottom:6px;border-bottom:1px solid #bbb}
+.si{width:18px;height:18px;vertical-align:middle;margin-right:6px;position:relative;top:-1px}
+.section h3{font-size:12px;font-weight:700;color:#1a1a1a;margin:14px 0 8px;text-transform:uppercase;letter-spacing:.3px}
+.stat-grid{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.stat-card{background:#f9f9f9;border:1px solid #bbb;border-top:3px solid #1a1a1a!important;border-radius:2px;padding:12px 16px;min-width:110px;flex:1}
+.stat-value{font-size:24px;font-weight:700;color:#1a1a1a}
+.stat-label{font-size:11px;color:#555;margin-top:2px}
+.info-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px;margin-bottom:12px}
+.info-grid div{background:#f9f9f9;padding:10px 14px;border:1px solid #ddd;border-radius:2px}
+.info-grid .label{display:block;font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px}
+.info-grid .value{display:block;font-size:13px;font-weight:600;margin-top:2px}
+.score-card{background:#f9f9f9;border:1px solid #bbb;border-radius:2px;padding:14px 20px;min-width:160px;align-self:flex-start}
+.score-label{font-size:10px;color:#666;text-transform:uppercase;letter-spacing:.5px}
+.score-num{font-size:28px;font-weight:700;color:#1a1a1a;margin:4px 0 2px}
+.score-max{font-size:13px;color:#555;font-weight:400}
+.score-bar-bg{background:#ddd;border-radius:2px;height:6px;margin:6px 0 4px}
+.score-bar{height:6px;border-radius:2px}
+.score-pct{font-size:11px;color:#555}
+.tenant-top{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-top:6px}
+thead{background:#f0f0f0}
+th{text-align:left;padding:8px 10px;font-weight:700;font-size:10px;text-transform:uppercase;letter-spacing:.4px;color:#1a1a1a;border-top:1px solid #bbb;border-bottom:2px solid #1a1a1a;cursor:pointer;white-space:nowrap}
+th:hover{background:#e5e5e5}
+td{padding:7px 10px;border-bottom:1px solid #e0e0e0;vertical-align:middle}
+tr:hover td{background:#f9f9f9}
+tr:last-child td{border-bottom:1px solid #bbb}
+.row-never td{background:#fce8e8!important}
+.row-inactive td{background:#fff8e1!important}
+.row-disabled td{opacity:.6}
+.finding{border-radius:2px;padding:14px 18px;margin-bottom:10px;border:1px solid #ddd;border-left:4px solid #999}
+.finding-high{background:#fff5f5;border-left-color:#b00020}
+.finding-medium{background:#fffbf0;border-left-color:#c05000}
+.finding-low{background:#f0f7ff;border-left-color:#005a9e}
+.finding-head{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.finding p{font-size:12px;color:#333}
+.action-line{margin-top:6px!important;font-size:11px!important;color:#555!important;font-style:italic}
+.badge{display:inline-block;padding:2px 8px;border-radius:2px;font-size:10px;font-weight:700;letter-spacing:.5px;border:1px solid currentColor}
+.badge-high{background:#ffe8e8;color:#b00020}
+.badge-medium{background:#fff0e0;color:#c05000}
+.badge-low{background:#e8f0fe;color:#005a9e}
+.badge-ext{background:#ffe8e8;color:#b00020;font-size:10px;padding:2px 6px;border-radius:2px;font-weight:700}
+.badge-guest{background:#f0e8ff;color:#5c2d91;font-size:10px;padding:2px 6px;border-radius:2px}
+.badge-never{color:#b00020;font-weight:700}
+.badge-yes{background:#e8f5e9;color:#1a7530;font-size:11px;padding:2px 6px;border-radius:2px}
+.badge-no{background:#ffe8e8;color:#b00020;font-size:11px;padding:2px 6px;border-radius:2px}
+.pill{display:inline-block;background:#f0f0f0;color:#333;padding:2px 6px;border-radius:2px;margin:2px;font-size:10px;white-space:nowrap;border:1px solid #ccc}
+.ok{color:#1a7530;font-weight:600}
+.bad{color:#b00020;font-weight:600}
+.na{color:#999;font-style:italic}
+.empty{color:#666;font-style:italic;padding:10px 0}
+.warning{background:#fffbe6;border-left:3px solid #c05000;padding:10px 14px;color:#333;margin:6px 0}
+.search-bar{margin:10px 0;padding:8px;background:#f5f5f5;border:1px solid #ddd;border-radius:2px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.search-bar input{flex:1;min-width:180px;max-width:320px;padding:6px 10px;border:1px solid #ccc;border-radius:2px;font-size:12px}
+.search-bar input:focus{outline:none;border-color:#1a1a1a}
+.filter-btn{padding:4px 10px;border:1px solid #ccc;background:white;cursor:pointer;border-radius:2px;font-size:11px;font-weight:600;color:#333}
+.filter-btn:hover{border-color:#1a1a1a}
+.filter-btn.active{background:#1a1a1a;color:white;border-color:#1a1a1a}
+.legend{display:flex;gap:12px;margin:6px 0 10px;font-size:11px;flex-wrap:wrap}
+.legend-item{display:flex;align-items:center;gap:6px}
+.ldot{width:10px;height:10px;border-radius:2px;flex-shrink:0}
+footer{text-align:center;padding:14px;color:#555;font-size:11px;border-top:1px solid #ccc}
+.delta-meta{font-size:11px;color:#555;margin-bottom:12px}
+.delta-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px;margin-bottom:14px}
+.delta-card{background:#f9f9f9;border:1px solid #ccc;border-radius:2px;padding:12px 14px}
+.delta-label{font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.delta-values{display:flex;align-items:baseline;gap:4px;margin-bottom:4px;flex-wrap:wrap}
+.delta-prev{font-size:14px;font-weight:600;color:#888}
+.delta-arrow{color:#aaa;font-size:12px}
+.delta-curr{font-size:20px;font-weight:700}
+.delta-change{display:inline-block;padding:1px 6px;border-radius:2px;font-size:10px;font-weight:700}
+.delta-better .delta-curr{color:#1a7530}
+.delta-better .delta-change{background:#e8f5e9;color:#1a7530}
+.delta-worse  .delta-curr{color:#b00020}
+.delta-worse  .delta-change{background:#ffe8e8;color:#b00020}
+.delta-neutral .delta-curr{color:#1a1a1a}
+.delta-neutral .delta-change{background:#f0f0f0;color:#555}
+.delta-chart{margin:10px 0 4px}
+.delta-sparkgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px;margin:8px 0 4px}
+.delta-spark{background:#f5f5f5;border:1px solid #ddd;border-radius:2px;padding:6px 8px}
+@media print{
+  *{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  nav,.search-bar{display:none}
+  header{padding:10px 0;border-bottom:2px solid #1a1a1a}
+  main{padding:0;max-width:100%}
+  .section{border:1px solid #bbb;margin-bottom:8px;page-break-inside:avoid;box-shadow:none}
+  .stat-card{border:1px solid #bbb;border-top:3px solid #1a1a1a;page-break-inside:avoid}
+  .finding{page-break-inside:avoid}
+  table{font-size:11px}
+  td,th{padding:5px 8px}
+  tr{page-break-inside:avoid}
+  .delta-grid,.delta-sparkgrid{page-break-inside:avoid}
+}
+</style>
+"@
 } else {
 @"
 <style>
@@ -1502,6 +1742,13 @@ $reportHeaderHtml = if ($IverBranding) {
   <p>Generated $reportDate &nbsp;&bull;&nbsp; Findings: <strong>$highCount HIGH</strong> &nbsp;&bull;&nbsp; $medCount MEDIUM &nbsp;&bull;&nbsp; $lowCount LOW$mfaNote</p>
 </header>
 "@
+} elseif ($PrintFriendly) {
+@"
+<header>
+  <h1>$EffectiveTenantName &mdash; M365 Customer Report</h1>
+  <p>Generated $reportDate &nbsp;&bull;&nbsp; Findings: <strong>$highCount HIGH</strong> &nbsp;&bull;&nbsp; $medCount MEDIUM &nbsp;&bull;&nbsp; $lowCount LOW$mfaNote</p>
+</header>
+"@
 } else {
 @"
 <header>
@@ -1513,11 +1760,11 @@ $reportHeaderHtml = if ($IverBranding) {
 
 $reportFooterHtml = if ($IverBranding) {
 @"
-<footer>${footerLogoHtml}Get-CustomerReport.ps1 v1.5.0 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\<br><small style="opacity:.6">&copy; $(Get-Date -Format 'yyyy') Iver Managed Services</small></footer>
+<footer>${footerLogoHtml}Get-CustomerReport.ps1 v1.5.3 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\<br><small style="opacity:.6">&copy; $(Get-Date -Format 'yyyy') Iver Managed Services</small></footer>
 "@
 } else {
 @"
-<footer>Get-CustomerReport.ps1 v1.5.0 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\</footer>
+<footer>Get-CustomerReport.ps1 v1.5.3 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\</footer>
 "@
 }
 
@@ -1695,13 +1942,48 @@ $reportFooterHtml
 </html>
 "@
 
-# ── SAVE ──────────────────────────────────────────────────────────────────────
-if (-not (Test-Path $OutputPath)) {
-    New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
+# ── SAVE REPORT ───────────────────────────────────────────────────────────────
+$reportFile = $null
+if ($OutputFormat -ne 'JsonOnly') {
+    if (-not (Test-Path $OutputPath)) {
+        New-Item -ItemType Directory -Path $OutputPath -Force | Out-Null
+    }
+    $baseName = "${shortName}_CustomerReport_$sourceTimestamp"
+
+    switch ($OutputFormat) {
+        'HTML' {
+            $reportFile = Join-Path $OutputPath "$baseName.html"
+            $html | Set-Content -Path $reportFile -Encoding UTF8
+        }
+        'PDF' {
+            $htmlPath   = Join-Path $OutputPath "$baseName.html"
+            $reportFile = Join-Path $OutputPath "$baseName.pdf"
+            $html | Set-Content -Path $htmlPath -Encoding UTF8
+            $edgePaths  = @(
+                "${env:ProgramFiles}\Microsoft\Edge\Application\msedge.exe"
+                "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+            )
+            $edgeExe = $edgePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+            if ($edgeExe) {
+                Write-Host "[INFO] Converting to PDF via Edge headless..." -ForegroundColor Cyan
+                $fileUri = "file:///$($htmlPath.Replace('\','/'))"
+                & $edgeExe --headless --disable-gpu --no-pdf-header-footer --print-to-pdf="$reportFile" $fileUri 2>$null
+                Start-Sleep -Seconds 4
+                if (-not (Test-Path $reportFile)) {
+                    Write-Warning "PDF conversion failed — HTML report saved at $htmlPath"
+                    $reportFile = $htmlPath
+                }
+            } else {
+                Write-Warning "Microsoft Edge not found — cannot convert to PDF. HTML saved at $htmlPath"
+                $reportFile = $htmlPath
+            }
+        }
+        'Markdown' {
+            $reportFile = Join-Path $OutputPath "$baseName.md"
+            Build-MarkdownReport | Set-Content -Path $reportFile -Encoding UTF8
+        }
+    }
 }
-$fileName   = "${shortName}_CustomerReport_$(Get-Date -Format 'yyyyMMdd_HHmm').html"
-$reportFile = Join-Path $OutputPath $fileName
-$html | Set-Content -Path $reportFile -Encoding UTF8
 
 # ── UPDATE / CREATE CUSTOMERS.JSON ────────────────────────────────────────────
 # Derive suggested values from live collected data
@@ -1729,7 +2011,7 @@ function Update-ProfileFields {
         TenantCreated        = if ($org.CreatedDateTime) { ([datetime]$org.CreatedDateTime).ToString('yyyy-MM-dd') } else { "" }
         PrimaryLicenseSku    = $primaryLicenseSku
         LastReportDate       = (Get-Date -Format 'yyyy-MM-dd HH:mm')
-        LastReportPath       = $reportFile
+        LastReportPath       = if ($reportFile) { $reportFile } else { $target.LastReportPath }
     }
     foreach ($key in $fields.Keys) {
         if (-not ($target | Get-Member -Name $key -ErrorAction SilentlyContinue)) {
@@ -1786,7 +2068,7 @@ if ($doCreate) {
             TenantCreated        = if ($org.CreatedDateTime) { ([datetime]$org.CreatedDateTime).ToString('yyyy-MM-dd') } else { "" }
             PrimaryLicenseSku    = $primaryLicenseSku
             LastReportDate       = (Get-Date -Format 'yyyy-MM-dd HH:mm')
-            LastReportPath       = $reportFile
+            LastReportPath       = if ($reportFile) { $reportFile } else { $sourcePath }
             Notes                = ""
         }
         $existingProfiles = @()
@@ -1810,9 +2092,13 @@ if (Test-Path $CustomersFile) {
     }
 }
 
-Write-Host "`n[SUCCESS] Report saved:      $reportFile" -ForegroundColor Green
+if ($reportFile) {
+    Write-Host "`n[SUCCESS] Report saved:      $reportFile" -ForegroundColor Green
+} else {
+    Write-Host "`n[SUCCESS] JsonOnly — no report generated." -ForegroundColor Cyan
+}
 Write-Host "[SUCCESS] Raw source data:   $sourcePath" -ForegroundColor Green
-Start-Process $reportFile
+if ($reportFile -and (Test-Path $reportFile)) { Start-Process $reportFile }
 
 # ── DISCONNECT ─────────────────────────────────────────────────────────────────
 # NOTE: Disconnect-ExchangeOnline is intentionally omitted — it crashes the PowerShell
