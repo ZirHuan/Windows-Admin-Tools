@@ -257,11 +257,8 @@ Send test mail to: admin@example.com
 
 ---
 
-## GitHub / Commit Suggestion
+## Versioning
 
-Suggested commit message:
-```
-feat: Make smtp-relay-tester.ps1 compatible with Windows PowerShell 5.1 and PS7
-```
-
-Suggested repo location: `M365-Tools/` or `Exchange/` folder.
+The running version is printed in the banner (`=== SMTP Relay Tester vX.Y.Z ===`).
+Changes are tracked in [`CHANGELOG.md`](CHANGELOG.md); releases are tagged
+`smtp-relay-tester-ps-v*`.

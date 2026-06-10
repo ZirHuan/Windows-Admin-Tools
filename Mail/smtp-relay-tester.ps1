@@ -47,6 +47,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+# Tool version - shown in the banner and tracked in CHANGELOG.md
+$ScriptVersion = '1.0.0'
+
 # ---------------------------------------------------------------------------
 # PS 5.1 / 7 compatibility shims for automatic platform variables
 # $IsWindows, $IsLinux, $IsMacOS do not exist in Windows PowerShell 5.1.
@@ -499,7 +502,7 @@ function Invoke-AuthPlain {
 $script:VerboseMode = $false
 
 Write-Host ""
-Write-Host "=== SMTP Relay Tester ===" -ForegroundColor White
+Write-Host "=== SMTP Relay Tester v$ScriptVersion ===" -ForegroundColor White
 Write-Host "  PS 5.1/7 edition - raw socket SMTP diagnostic" -ForegroundColor DarkCyan
 Write-Host ""
 
