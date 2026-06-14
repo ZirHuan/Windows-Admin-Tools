@@ -76,6 +76,60 @@ Migrate a user's mailbox to shared status and transfer ownership in M365. Useful
 .\move365user-shared.ps1 -UserUPN "user@contoso.com" -NewOwnerUPN "manager@contoso.com"
 ```
 
+### Org-wide calendar sharing (without exposing history)
+
+Two scripts that solve a common request: *"make everyone able to see everyone's calendar — but
+don't expose the sensitive historical meetings, only going forward."*
+
+Exchange Online has **no** native way to share "future events only" — calendar folder permissions
+always cover the whole folder (past + future). The supported workaround is to mask the history as
+**Private** first, then open the calendars. A Private item is hidden from anyone with normal
+sharing permissions (they see a busy block labelled *Private*, no subject/body), unless they hold
+Full Access or Delegate + ViewPrivateItems — which these scripts do not grant.
+
+> **Caveat:** "Private" is an honour-based Outlook/EXO flag, **not encryption**. For genuinely
+> confidential meetings use Microsoft Purview sensitivity labels with encryption instead.
+
+Run them in order:
+
+**1. `Set-HistoricalCalendarPrivate.ps1`** — bulk-sets `sensitivity = private` (via Microsoft
+Graph) on every event ending before a cutoff date, across all or selected mailboxes.
+
+```powershell
+# Preview only (no changes), one pilot mailbox:
+.\Set-HistoricalCalendarPrivate.ps1 -CutoffUtc (Get-Date '2026-06-14T00:00:00Z') -Mailbox pilot@contoso.com -WhatIf
+
+# Live, all mailboxes (recurring series masked too):
+.\Set-HistoricalCalendarPrivate.ps1 -CutoffUtc (Get-Date '2026-06-14T00:00:00Z')
+
+# Skip recurring series that may still have future occurrences:
+.\Set-HistoricalCalendarPrivate.ps1 -CutoffUtc (Get-Date '2026-06-14T00:00:00Z') -SkipRecurringMasters
+```
+
+**2. `Enable-OrgCalendarSharing.ps1`** — sets the `Default` (everyone-in-org) permission on each
+Calendar folder via `Set-MailboxFolderPermission`, without granting ViewPrivateItems.
+
+```powershell
+# Preview, one mailbox:
+.\Enable-OrgCalendarSharing.ps1 -AccessRight LimitedDetails -Mailbox pilot@contoso.com -WhatIf
+
+# Live, all mailboxes (subject + location, no body):
+.\Enable-OrgCalendarSharing.ps1 -AccessRight LimitedDetails
+
+# Other levels: AvailabilityOnly (free/busy only) | Reviewer (full details, read-only)
+```
+
+**Requirements:** `Set-HistoricalCalendarPrivate.ps1` needs the `Microsoft.Graph` module and the
+`Calendars.ReadWrite` scope; `Enable-OrgCalendarSharing.ps1` needs `ExchangeOnlineManagement` and
+an Exchange admin role. Localised tenants: the Calendar folder may be named in the mailbox language
+(e.g. "Kalender") — see the note at the foot of the sharing script.
+
+**Sources:**
+[Set-MailboxFolderPermission](https://learn.microsoft.com/powershell/module/exchangepowershell/set-mailboxfolderpermission?view=exchange-ps) ·
+[Graph event resource (sensitivity)](https://learn.microsoft.com/graph/api/resources/event?view=graph-rest-1.0) ·
+[KB 4021947 — private appointments on shared calendars](https://learn.microsoft.com/troubleshoot/outlook/calendaring/outlook-or-owa-not-shows-full-details-of-private-appointments) ·
+[Purview sensitivity labels for meetings](https://learn.microsoft.com/purview/sensitivity-labels-meetings)
+
 ## Configuration
 
 ### customers.json
