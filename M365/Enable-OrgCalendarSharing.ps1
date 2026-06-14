@@ -37,6 +37,9 @@ param(
     [string[]]$Mailbox
 )
 
+$ScriptVersion = '1.0.0'
+Write-Host "Enable-OrgCalendarSharing v$ScriptVersion" -ForegroundColor Cyan
+
 if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
     throw "ExchangeOnlineManagement not found. Install: Install-Module ExchangeOnlineManagement -Scope CurrentUser"
 }

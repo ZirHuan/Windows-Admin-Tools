@@ -48,6 +48,9 @@ param(
     [int]$ThrottleDelayMs = 200
 )
 
+$ScriptVersion = '1.0.0'
+Write-Host "Set-HistoricalCalendarPrivate v$ScriptVersion" -ForegroundColor Cyan
+
 # --- Connect ---
 if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Calendar)) {
     throw "Microsoft.Graph module not found. Install: Install-Module Microsoft.Graph -Scope CurrentUser"
