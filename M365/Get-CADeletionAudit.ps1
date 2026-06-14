@@ -30,13 +30,14 @@ if ($Customer -and -not $TenantId) {
         throw "customers.json not found at $customersFile. Pass -TenantId directly or create the file."
     }
     $profiles = Get-Content $customersFile -Raw | ConvertFrom-Json
-    $profile  = $profiles | Where-Object { $_.ShortName -ieq $Customer }
-    if (-not $profile) {
+    # Note: avoid the automatic $profile variable — use a distinct name.
+    $customerProfile = $profiles | Where-Object { $_.ShortName -ieq $Customer }
+    if (-not $customerProfile) {
         $available = ($profiles.ShortName) -join ', '
         throw "Customer '$Customer' not found. Available: $available"
     }
-    $TenantId = $profile.TenantId
-    Write-Host "[INFO] Loaded TenantId for '$($profile.DisplayName)': $TenantId" -ForegroundColor Cyan
+    $TenantId = $customerProfile.TenantId
+    Write-Host "[INFO] Loaded TenantId for '$($customerProfile.DisplayName)': $TenantId" -ForegroundColor Cyan
 }
 
 if (-not $TenantId) {
@@ -67,17 +68,26 @@ $uri = "https://graph.microsoft.com/v1.0/auditLogs/directoryAudits" +
 
 try {
     Write-Host "[INFO] Querying audit logs for CA policy deletions..." -ForegroundColor Cyan
-    $response = Invoke-MgGraphRequest -Method GET -Uri $uri -ErrorAction Stop
 
-    if (-not $response.value -or $response.value.Count -eq 0) {
+    # Page through all results via @odata.nextLink — a single request caps at the
+    # page size ($top) and would silently drop older deletion events.
+    $events = [System.Collections.Generic.List[object]]::new()
+    $next   = $uri
+    while ($next) {
+        $page = Invoke-MgGraphRequest -Method GET -Uri $next -ErrorAction Stop
+        if ($page.value) { $events.AddRange([object[]]$page.value) }
+        $next = $page.'@odata.nextLink'
+    }
+
+    if ($events.Count -eq 0) {
         Write-Host ""
         Write-Host "No CA policy deletion events found in audit logs." -ForegroundColor Yellow
         Write-Host "Either no policies were deleted, or log retention has expired (max 30 days without Entra P1/P2)." -ForegroundColor Yellow
     } else {
-        Write-Host "[INFO] Found $($response.value.Count) deletion event(s):" -ForegroundColor Green
+        Write-Host "[INFO] Found $($events.Count) deletion event(s):" -ForegroundColor Green
         Write-Host ""
 
-        $results = $response.value | ForEach-Object {
+        $results = $events | ForEach-Object {
             $actor = if ($_.initiatedBy.user) {
                 "$($_.initiatedBy.user.userPrincipalName) (User)"
             } elseif ($_.initiatedBy.app) {
