@@ -30,9 +30,20 @@
 .PARAMETER ThrottleDelayMs
     Pause between PATCH calls to ease Graph throttling.
 
+.PARAMETER TenantId
+    Entra tenant (directory) ID. Supply together with ClientId + ClientSecret to connect app-only.
+    App-only is REQUIRED to write into another user's mailbox (delegated only reaches your own).
+
+.PARAMETER ClientId
+    App registration (application) ID with Graph APPLICATION permission Calendars.ReadWrite + User.Read.All.
+
+.PARAMETER ClientSecret
+    Client secret value for the app registration. App-only auth is used when all three are supplied.
+
 .NOTES
     Requires: PowerShell 7+, Microsoft.Graph module.
-    Graph scope: Calendars.ReadWrite (delegated admin) or application permission Calendars.ReadWrite.
+    Graph scope: Calendars.ReadWrite. To touch OTHER mailboxes use APPLICATION permission (app-only)
+    via -TenantId/-ClientId/-ClientSecret. Without them it falls back to delegated (own mailbox only).
     RUN AGAINST A PILOT MAILBOX FIRST with -WhatIf.
 #>
 
@@ -45,10 +56,16 @@ param(
 
     [switch]$SkipRecurringMasters,
 
-    [int]$ThrottleDelayMs = 200
+    [int]$ThrottleDelayMs = 200,
+
+    [string]$TenantId,
+
+    [string]$ClientId,
+
+    [string]$ClientSecret
 )
 
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.1.0'
 Write-Host "Set-HistoricalCalendarPrivate v$ScriptVersion" -ForegroundColor Cyan
 
 # --- Connect ---
@@ -58,7 +75,16 @@ if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Calendar)) {
 Import-Module Microsoft.Graph.Calendar -ErrorAction Stop
 Import-Module Microsoft.Graph.Users -ErrorAction Stop
 
-Connect-MgGraph -Scopes "Calendars.ReadWrite","User.Read.All" -NoWelcome
+if ($TenantId -and $ClientId -and $ClientSecret) {
+    Write-Host "Connecting app-only (application permissions)..." -ForegroundColor Cyan
+    $sec  = ConvertTo-SecureString $ClientSecret -AsPlainText -Force
+    $cred = New-Object System.Management.Automation.PSCredential($ClientId, $sec)
+    Connect-MgGraph -TenantId $TenantId -ClientSecretCredential $cred -NoWelcome
+}
+elseif (-not (Get-MgContext)) {
+    Write-Host "Connecting delegated (own mailbox only)..." -ForegroundColor Cyan
+    Connect-MgGraph -Scopes "Calendars.ReadWrite","User.Read.All" -NoWelcome
+}
 
 $cutoffString = $CutoffUtc.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 Write-Host "Cutoff (UTC): $cutoffString" -ForegroundColor Cyan
