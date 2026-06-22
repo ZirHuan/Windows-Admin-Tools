@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 <#
 .SYNOPSIS
     Mask historical calendar events as Private before opening calendars org-wide.
@@ -30,9 +31,19 @@
 .PARAMETER ThrottleDelayMs
     Pause between PATCH calls to ease Graph throttling.
 
+.PARAMETER TenantId
+    Entra tenant ID. Required when using app-only auth (-ClientId / -ClientSecret).
+
+.PARAMETER ClientId
+    App registration client ID for app-only auth.
+
+.PARAMETER ClientSecret
+    Client secret value for app-only auth.
+
 .NOTES
-    Requires: PowerShell 7+, Microsoft.Graph module.
-    Graph scope: Calendars.ReadWrite (delegated admin) or application permission Calendars.ReadWrite.
+    Requires: PowerShell 7+, Microsoft.Graph.Authentication, Microsoft.Graph.Users modules.
+    Auth: pass -TenantId/-ClientId/-ClientSecret for app-only (Calendars.ReadWrite application
+    permission required). Omit for interactive delegated auth.
     RUN AGAINST A PILOT MAILBOX FIRST with -WhatIf.
 #>
 
@@ -45,20 +56,30 @@ param(
 
     [switch]$SkipRecurringMasters,
 
-    [int]$ThrottleDelayMs = 200
+    [int]$ThrottleDelayMs = 200,
+
+    [string]$TenantId,
+    [string]$ClientId,
+    [string]$ClientSecret
 )
 
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.2.0'
 Write-Host "Set-HistoricalCalendarPrivate v$ScriptVersion" -ForegroundColor Cyan
 
 # --- Connect ---
-if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Calendar)) {
-    throw "Microsoft.Graph module not found. Install: Install-Module Microsoft.Graph -Scope CurrentUser"
+if (-not (Get-Module -ListAvailable -Name Microsoft.Graph.Authentication)) {
+    throw "Microsoft.Graph.Authentication module not found. Install: Install-Module Microsoft.Graph -Scope CurrentUser"
 }
-Import-Module Microsoft.Graph.Calendar -ErrorAction Stop
+Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
 Import-Module Microsoft.Graph.Users -ErrorAction Stop
 
-Connect-MgGraph -Scopes "Calendars.ReadWrite","User.Read.All" -NoWelcome
+if ($TenantId -and $ClientId -and $ClientSecret) {
+    $SecureSecret = ConvertTo-SecureString $ClientSecret -AsPlainText -Force
+    $Credential   = New-Object System.Management.Automation.PSCredential($ClientId, $SecureSecret)
+    Connect-MgGraph -TenantId $TenantId -ClientSecretCredential $Credential -NoWelcome
+} else {
+    Connect-MgGraph -Scopes "Calendars.ReadWrite","User.Read.All" -NoWelcome
+}
 
 $cutoffString = $CutoffUtc.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 Write-Host "Cutoff (UTC): $cutoffString" -ForegroundColor Cyan
@@ -68,38 +89,49 @@ if ($Mailbox) {
     $users = $Mailbox | ForEach-Object { Get-MgUser -UserId $_ -ErrorAction Stop }
 } else {
     $users = Get-MgUser -All -Filter "accountEnabled eq true" -Property "id,userPrincipalName,mail" |
-             Where-Object { $_.Mail }   # mailbox-enabled only
+             Where-Object { $_.Mail }
 }
 
 $totalPatched = 0
 foreach ($u in $users) {
     Write-Host "`n=== $($u.UserPrincipalName) ===" -ForegroundColor Yellow
     $patched = 0
+
+    # Fetch events via raw Graph call — no Microsoft.Graph.Calendar module needed
     try {
-        # Events that END before cutoff. end/dateTime is a UTC string -> lexical compare is valid.
-        $filter = "end/dateTime lt '$cutoffString'"
-        $events = Get-MgUserEvent -UserId $u.Id -Filter $filter -All `
-                    -Property "id,subject,sensitivity,type,recurrence,end" -ErrorAction Stop
+        $filterEncoded = [uri]::EscapeDataString("end/dateTime lt '$cutoffString'")
+        $uri = "https://graph.microsoft.com/v1.0/users/$($u.Id)/events?`$filter=$filterEncoded&`$select=id,subject,sensitivity,type,end&`$top=999"
+        $events = [System.Collections.Generic.List[object]]::new()
+        do {
+            $response = Invoke-MgGraphRequest -Method GET -Uri $uri -OutputType PSObject -ErrorAction Stop
+            foreach ($ev in $response.value) { $events.Add($ev) }
+            $uri = $response.'@odata.nextLink'
+        } while ($uri)
     }
     catch {
         Write-Warning "  Could not read calendar for $($u.UserPrincipalName): $($_.Exception.Message)"
         continue
     }
 
+    Write-Host "  Found: $($events.Count) event(s) before cutoff" -ForegroundColor Gray
+
     foreach ($e in $events) {
-        if ($e.Sensitivity -eq 'private') { continue }                       # already masked
-        if ($SkipRecurringMasters -and $e.Type -eq 'seriesMaster') {
-            Write-Host "  skip (recurring master): $($e.Subject)" -ForegroundColor DarkGray
+        if ($e.sensitivity -eq 'private') { continue }
+        if ($SkipRecurringMasters -and $e.type -eq 'seriesMaster') {
+            Write-Host "  skip (recurring master): $($e.subject)" -ForegroundColor DarkGray
             continue
         }
-        if ($PSCmdlet.ShouldProcess("$($u.UserPrincipalName): $($e.Subject)", "Set sensitivity=private")) {
+        if ($PSCmdlet.ShouldProcess("$($u.UserPrincipalName): $($e.subject)", "Set sensitivity=private")) {
             try {
-                Update-MgUserEvent -UserId $u.Id -EventId $e.Id -Sensitivity "private" -ErrorAction Stop
+                Invoke-MgGraphRequest -Method PATCH `
+                    -Uri "https://graph.microsoft.com/v1.0/users/$($u.Id)/events/$($e.id)" `
+                    -Body @{ sensitivity = "private" } `
+                    -ErrorAction Stop
                 $patched++
                 Start-Sleep -Milliseconds $ThrottleDelayMs
             }
             catch {
-                Write-Warning "  PATCH failed for '$($e.Subject)': $($_.Exception.Message)"
+                Write-Warning "  PATCH failed for '$($e.subject)': $($_.Exception.Message)"
             }
         }
     }
