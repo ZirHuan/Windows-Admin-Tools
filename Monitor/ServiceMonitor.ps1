@@ -278,10 +278,11 @@ function Parse-Services {
 
     foreach ($line in $Lines) {
         $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed -match '^#') { continue }   # blank / comment
         if ($trimmed -match '^[\*\-]\s*(.+)') {
             $name = $Matches[1].Trim()
             if ($name) { $paused.Add($name) }
-        } elseif ($trimmed) {
+        } else {
             $active.Add($trimmed)
         }
     }
