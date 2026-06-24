@@ -1,0 +1,8 @@
+# ServiceMonitor — alert recipient list
+# One email address per line.
+# Lines starting with # and blank lines are ignored.
+
+christer.rosvall@iver.se
+christer@rosvalls.com
+# add more addresses below:
+# ops-team@example.com

@@ -1,0 +1,24 @@
+# ServiceMonitor — service list
+# One Windows service name per line (use the short "Service Name", not Display Name).
+# Lines starting with * or - are PAUSED (skipped without error).
+# Lines starting with # and blank lines are ignored.
+#
+# Find service names: Get-Service | Select-Object Name, DisplayName, Status
+
+# Core Windows services
+Spooler
+W32Time
+wuauserv
+
+# Network / infrastructure
+LanmanServer
+LanmanWorkstation
+Dnscache
+
+# Examples of paused services (will be skipped):
+* BITS
+- WSearch
+
+# Application services — add yours here
+# AppMgr
+# YourAppService
