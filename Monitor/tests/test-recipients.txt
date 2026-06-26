@@ -1,0 +1,3 @@
+# ServiceMonitor test recipient list
+# Tests run with -NoEmail so no actual mail is sent.
+test-noreply@example.com
