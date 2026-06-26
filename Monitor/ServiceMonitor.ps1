@@ -139,7 +139,7 @@ $script:SmtpNetworkCredential = $null
 # ---------------------------------------------------------------------------
 
 function Initialize-Log {
-    $logDir = Split-Path -LiteralPath $LogFile -Parent
+    $logDir = Split-Path -LiteralPath $LogFile
     if ($logDir -and -not (Test-Path -LiteralPath $logDir)) {
         try { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
         catch { Write-Warning "Cannot create log directory '$logDir': $_" }
