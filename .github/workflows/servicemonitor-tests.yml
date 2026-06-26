@@ -1,7 +1,7 @@
 name: ServiceMonitor Pester Tests
 
 # Runs the ServiceMonitor Pester v5 suite on a real Windows runner, across BOTH
-# Windows PowerShell 5.1 and PowerShell 7 — the matrix that cannot be reproduced
+# Windows PowerShell 5.1 and PowerShell 7 -- the matrix that cannot be reproduced
 # on the Linux dev host. Scoped to Monitor/** so unrelated tool changes don't fire.
 
 on:
@@ -36,16 +36,20 @@ jobs:
           - shell: pwsh         # PowerShell 7.x (pre-installed)
             label: ps7
 
+    # 'shell:' is not allowed to read the matrix context per step, but
+    # defaults.run.shell is -- so set it once here for all run steps.
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Show PowerShell version
-        shell: ${{ matrix.shell }}
         run: $PSVersionTable | Format-List
 
       - name: Install Pester 5
-        shell: ${{ matrix.shell }}
         run: |
           # Win PS 5.1 ships Pester 3.4 built-in; force the gallery 5.x alongside it.
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -54,7 +58,6 @@ jobs:
           Get-Module Pester | Select-Object Name, Version
 
       - name: Run Pester
-        shell: ${{ matrix.shell }}
         run: |
           Import-Module Pester -MinimumVersion 5.5.0
           $config = New-PesterConfiguration
