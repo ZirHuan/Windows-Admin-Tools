@@ -609,7 +609,7 @@ foreach ($entry in $activeEntries) {
         $restartResult = Invoke-ServiceRestart -ServiceName $svcName
         if (-not $restartResult.Success) {
             $lastError = $restartResult.ErrorText
-            Write-Log -Level WARNING -Message "sc.exe reported failure on attempt $attempt: $lastError"
+            Write-Log -Level WARNING -Message "sc.exe reported failure on attempt ${attempt}: $lastError"
         }
         Write-Log -Level INFO -Message "Settling $StartSettleSeconds s after start command..."
         Start-Sleep -Seconds $StartSettleSeconds
