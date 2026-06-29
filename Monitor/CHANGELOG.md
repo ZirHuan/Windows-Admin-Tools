@@ -5,6 +5,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning follo
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-06-29
+
+### Fixed (Windows host testing, 2026-06-29)
+- **HIGH** `install-monitor-web.ps1`: on a re-run, Python and NSSM detection now
+  succeed (per 1.2.1), but the file-copy step then threw "Cannot overwrite the
+  item ...\nssm.exe with itself" because nssm.exe was detected *inside*
+  `$InstallDir` and then copied onto itself. The copy is now skipped when the
+  resolved source and destination paths are equal.
+
 ## [1.2.1] - 2026-06-29
 
 ### Fixed (powershell-script-tester review, 2026-06-26)

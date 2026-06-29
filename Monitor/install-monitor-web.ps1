@@ -38,7 +38,7 @@
     .\install-monitor-web.ps1 -Port 9090 -SkipMigration
 
 .NOTES
-    Version: 1.2.1
+    Version: 1.2.2
     To remove: nssm remove ServiceMonitorWeb confirm
 #>
 
@@ -309,8 +309,15 @@ foreach ($f in $filesToCopy) {
     }
 }
 
-# Copy nssm
-Copy-Item -LiteralPath $nssmExe -Destination (Join-Path $InstallDir 'nssm.exe') -Force
+# Copy nssm - but skip if it is already the install-dir copy (e.g. on a re-run,
+# where the detection step found nssm.exe already inside $InstallDir).
+$nssmDest = Join-Path $InstallDir 'nssm.exe'
+if ([System.IO.Path]::GetFullPath($nssmExe) -ieq [System.IO.Path]::GetFullPath($nssmDest)) {
+    Write-Ok "nssm already in place: $nssmDest"
+} else {
+    Copy-Item -LiteralPath $nssmExe -Destination $nssmDest -Force
+    Write-Ok 'Copied nssm.exe'
+}
 
 # Copy or create monitor-config.json
 $configDest = Join-Path $InstallDir 'monitor-config.json'
