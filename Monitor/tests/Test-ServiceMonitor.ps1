@@ -35,7 +35,10 @@ BeforeAll {
     $script:Recipients  = Join-Path $script:TestRoot 'test-recipients.txt'
     # Points to a JSON file that must NOT exist - forces legacy flat-file mode in all tests
     $script:NoJsonConfig = Join-Path $script:TestRoot 'no-monitor-config.json'
-    '# test recipients' | Set-Content -Path $script:Recipients -Encoding UTF8
+    # Needs at least one real recipient so the alert path (and its [NoEmail]
+    # suppression logging) is actually exercised; -NoEmail means nothing is sent.
+    @('# test recipients', 'test-noreply@example.com') |
+        Set-Content -Path $script:Recipients -Encoding UTF8
 
     function Invoke-SM {
         # Helper: run ServiceMonitor.ps1 with -NoEmail and a fresh log, return log content.

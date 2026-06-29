@@ -47,6 +47,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning follo
   and verifies the package, so it works when nssm.cc is down). After winget it
   resolves the binary via `Get-Command` first, then the package store. Final error
   points to `winget install NSSM.NSSM` and the existing `-NssmPath` parameter.
+- **HIGH** `ServiceMonitor.ps1`: fixed StrictMode (`-Version Latest`) crashes that
+  failed ~7 Pester tests on the Windows CI runner. (1) `Get-AlertRecipients`
+  returns an unrolled empty array (becomes `$null`), so the five `$alertsTo.Count`
+  checks threw "property 'Count' cannot be found"; `$alertsTo` is now wrapped in
+  `@()` at assignment. (2) The "Active services to check" / "Paused" log lines used
+  `.Name` member access and `.Count` on possibly-empty collections; now built via
+  `ForEach-Object` with `@()`-wrapped counts. (3) `$tail` in `New-AlertBody`
+  wrapped in `@()`. (4) The `-TestEmail` short-circuit now runs *before* the
+  "Active services to check" log so TestEmail mode no longer logs it.
+- `tests/Test-ServiceMonitor.ps1`: the recipients fixture now includes a real
+  address so the `[NoEmail]` suppression path is actually exercised.
 
 ## [1.2.0] - 2026-06-26
 

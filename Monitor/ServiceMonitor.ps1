@@ -379,7 +379,7 @@ function New-AlertBody {
     }
     if (Test-Path -LiteralPath $LogFile) {
         try {
-            $tail = [System.IO.File]::ReadAllLines($LogFile) | Select-Object -Last 20
+            $tail = @([System.IO.File]::ReadAllLines($LogFile) | Select-Object -Last 20)
             if ($tail.Count -gt 0) {
                 $lines += ''
                 $lines += '--- Recent Log (last 20 lines) ---'
@@ -508,12 +508,7 @@ Import-MonitorConfig
 $activeEntries = @($script:ServiceEntries | Where-Object { -not $_.Paused })
 $pausedEntries = @($script:ServiceEntries | Where-Object { $_.Paused })
 
-if ($pausedEntries.Count -gt 0) {
-    Write-Log -Level INFO -Message "Paused (skipped): $($pausedEntries.Name -join ', ')"
-}
-Write-Log -Level INFO -Message "Active services to check ($($activeEntries.Count)): $($activeEntries.Name -join ', ')"
-
-# TestEmail mode
+# TestEmail mode - short-circuit before any service logging or checking.
 if ($TestEmail) {
     Write-Log -Level INFO -Message '=== TestEmail mode: sending connectivity test ==='
     $body = New-AlertBody -ServiceName '(test)' -Status 'TEST ALERT' -Attempt 0 `
@@ -526,7 +521,17 @@ if ($TestEmail) {
     exit 0
 }
 
-if ($activeEntries.Count -eq 0) {
+# Note: build the name lists with ForEach-Object (not .Name member access) so an
+# empty collection does not trip Set-StrictMode -Version Latest, and wrap counts
+# in @() so a scalar/$null never throws 'property Count cannot be found'.
+if (@($pausedEntries).Count -gt 0) {
+    $pausedNames = @($pausedEntries | ForEach-Object { $_.Name }) -join ', '
+    Write-Log -Level INFO -Message "Paused (skipped): $pausedNames"
+}
+$activeNames = @($activeEntries | ForEach-Object { $_.Name }) -join ', '
+Write-Log -Level INFO -Message "Active services to check ($(@($activeEntries).Count)): $activeNames"
+
+if (@($activeEntries).Count -eq 0) {
     Write-Log -Level ERROR -Message 'No active services to check - exiting.'
     exit 1
 }
@@ -536,7 +541,10 @@ $failureCount = 0
 
 foreach ($entry in $activeEntries) {
     $svcName   = $entry.Name
-    $alertsTo  = Get-AlertRecipients -AlertsValue $entry.Alerts
+    # Wrap in @() so $alertsTo is always an array: Get-AlertRecipients can return
+    # an unrolled empty array (-> $null) or a scalar, and the .Count checks below
+    # would otherwise throw under Set-StrictMode -Version Latest.
+    $alertsTo  = @(Get-AlertRecipients -AlertsValue $entry.Alerts)
 
     if ($svcName -notmatch $ServiceNamePattern) {
         Write-Log -Level ERROR -Message "Rejected invalid service name: '$svcName'."
