@@ -131,7 +131,9 @@ Describe 'Paused services' -Tag Quick {
 
     It 'Does not attempt to check or restart a paused service' {
         $log = Invoke-SM -ServicesContent '* NonExistentService_PAUSED'
-        $log | Should -Not -Match 'not found'
+        # 'not found on' is the service-not-found message; plain 'not found' would
+        # also match the unrelated "monitor-config.json not found" fallback warning.
+        $log | Should -Not -Match 'not found on'
         $log | Should -Not -Match 'Restart attempt'
     }
 }
