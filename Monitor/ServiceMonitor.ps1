@@ -100,7 +100,7 @@
     Run as Administrator for full restart capability.
     Schedule via Install-ScheduledTask.ps1 for continuous monitoring.
     Config file managed by monitor_web.py web admin UI.
-    Version: 1.2.0
+    Version: 1.2.1
 #>
 
 [CmdletBinding()]
@@ -127,7 +127,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = '1.2.0'
+$ScriptVersion = '1.2.1'
 $Hostname      = $env:COMPUTERNAME
 
 $ServiceNamePattern = '^[A-Za-z0-9_.$ -]+$'

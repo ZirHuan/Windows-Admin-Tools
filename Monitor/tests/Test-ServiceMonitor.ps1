@@ -77,7 +77,7 @@ AfterAll {
 Describe 'Startup banner' -Tag Quick {
     It 'Logs version and hostname in startup banner' {
         $log = Invoke-SM -ServicesContent 'Spooler'
-        $log | Should -Match 'ServiceMonitor v1\.2\.0'
+        $log | Should -Match 'ServiceMonitor v1\.2\.1'
         $log | Should -Match $env:COMPUTERNAME
     }
 }

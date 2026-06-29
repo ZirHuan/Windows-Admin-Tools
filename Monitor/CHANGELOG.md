@@ -5,6 +5,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning follo
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-06-29
+
 ### Fixed (powershell-script-tester review, 2026-06-26)
 - **CRITICAL** `install-monitor-web.ps1`: force TLS 1.2 before downloading NSSM from nssm.cc.
   Windows PowerShell 5.1 defaults to SSL3/TLS1.0 and the download would otherwise fail.
