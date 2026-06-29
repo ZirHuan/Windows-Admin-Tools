@@ -7,7 +7,7 @@
 
 .DESCRIPTION
     1. Verifies Python 3 and pip are available.
-    2. Installs fastapi and uvicorn via pip.
+    2. Installs fastapi, uvicorn, and python-multipart via pip.
     3. Locates or downloads NSSM (Non-Sucking Service Manager).
     4. Creates C:\ServiceMonitor if it does not exist and copies files there.
     5. Registers the web app as a Windows service (ServiceMonitorWeb).
@@ -189,12 +189,14 @@ standard locations. To fix:
 # ---------------------------------------------------------------------------
 # 2. pip packages
 # ---------------------------------------------------------------------------
-Write-Step 'Installing fastapi and uvicorn...'
-$pipOut = & $pythonExe -m pip install --quiet --upgrade fastapi uvicorn 2>&1
+# python-multipart is required by FastAPI for Form() handling (the /auth token
+# route) - without it uvicorn raises RuntimeError at startup and never binds.
+Write-Step 'Installing fastapi, uvicorn, and python-multipart...'
+$pipOut = & $pythonExe -m pip install --quiet --upgrade fastapi uvicorn python-multipart 2>&1
 if ($LASTEXITCODE -ne 0) {
     throw "pip install failed (exit $LASTEXITCODE): $($pipOut -join "`n")"
 }
-Write-Ok 'fastapi + uvicorn installed'
+Write-Ok 'fastapi + uvicorn + python-multipart installed'
 
 # ---------------------------------------------------------------------------
 # 3. NSSM

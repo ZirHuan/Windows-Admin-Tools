@@ -5,6 +5,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning follo
 
 ## [Unreleased]
 
+### Fixed
+- **HIGH** `install-monitor-web.ps1`: also install `python-multipart`. The web UI
+  uses FastAPI `Form()` (the `/auth` token route); without `python-multipart`
+  uvicorn raises `RuntimeError: Form data requires "python-multipart"` at startup
+  and never binds, so the service sat in NSSM's Paused (throttled) state and the
+  page was unreachable. Installer previously only installed `fastapi` + `uvicorn`.
+
 ## [1.2.2] - 2026-06-29
 
 ### Fixed (Windows host testing, 2026-06-29)
