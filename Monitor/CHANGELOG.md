@@ -40,6 +40,13 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning follo
   installs are preferred over per-user. Each candidate is validated for both a 3.x
   version and a functional `pip` (a Python with broken pip is skipped). The final
   error now also tells the user to disable the Store App execution aliases.
+- **HIGH** `install-monitor-web.ps1`: NSSM acquisition was a single hardcoded
+  `nssm.cc` download with no retry, so it died when the site returned 503. Now
+  retries the stable + CI URLs, clears stale/partial temp artifacts between
+  attempts, and falls back to `winget install NSSM.NSSM` (which uses its own CDN
+  and verifies the package, so it works when nssm.cc is down). After winget it
+  resolves the binary via `Get-Command` first, then the package store. Final error
+  points to `winget install NSSM.NSSM` and the existing `-NssmPath` parameter.
 
 ## [1.2.0] - 2026-06-26
 

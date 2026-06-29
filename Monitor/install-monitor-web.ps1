@@ -217,23 +217,72 @@ if ($NssmPath -and (Test-Path -LiteralPath $NssmPath)) {
     }
 }
 if (-not $nssmExe) {
-    Write-Warn 'nssm.exe not found. Attempting download from https://nssm.cc ...'
+    Write-Warn 'nssm.exe not found locally. Trying to obtain it...'
+    # PS 5.1 defaults to SSL3/TLS1.0; nssm.cc (and most sites) require TLS 1.2+.
+    [Net.ServicePointManager]::SecurityProtocol = `
+        [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $nssmZip  = Join-Path $env:TEMP 'nssm.zip'
     $nssmTemp = Join-Path $env:TEMP 'nssm'
-    try {
-        # PS 5.1 defaults to SSL3/TLS1.0; nssm.cc (and most sites) require TLS 1.2+.
-        [Net.ServicePointManager]::SecurityProtocol = `
-            [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri 'https://nssm.cc/ci/nssm-2.24-101-g897c7ad.zip' `
-                          -OutFile $nssmZip -UseBasicParsing
-        Expand-Archive -Path $nssmZip -DestinationPath $nssmTemp -Force
-        $nssmExe = Get-ChildItem -Recurse -Filter 'nssm.exe' $nssmTemp |
-                   Where-Object { $_.FullName -match 'win64' } |
-                   Select-Object -First 1 -ExpandProperty FullName
-        if (-not $nssmExe) { throw 'nssm.exe not found in archive.' }
-        Write-Ok "Downloaded nssm: $nssmExe"
-    } catch {
-        throw "Could not obtain nssm.exe: $_ - Download manually from https://nssm.cc"
+
+    # Attempt 1: download from nssm.cc (stable release first, then CI build).
+    # The site sometimes returns 503, so retry each URL a couple of times.
+    $urls = @(
+        'https://nssm.cc/release/nssm-2.24.zip',
+        'https://nssm.cc/ci/nssm-2.24-101-g897c7ad.zip'
+    )
+    foreach ($u in $urls) {
+        for ($try = 1; $try -le 2 -and -not $nssmExe; $try++) {
+            try {
+                # Clear any partial/corrupt artifacts from a prior attempt or run.
+                Remove-Item $nssmZip  -Force -ErrorAction SilentlyContinue
+                Remove-Item $nssmTemp -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Step "Downloading nssm from $u (attempt $try)..."
+                Invoke-WebRequest -Uri $u -OutFile $nssmZip -UseBasicParsing -TimeoutSec 30
+                Expand-Archive -Path $nssmZip -DestinationPath $nssmTemp -Force
+                $nssmExe = Get-ChildItem -Recurse -Filter 'nssm.exe' $nssmTemp |
+                           Where-Object { $_.FullName -match 'win64' } |
+                           Select-Object -First 1 -ExpandProperty FullName
+                if ($nssmExe) { Write-Ok "Downloaded nssm: $nssmExe" }
+            } catch {
+                Write-Warn "Download failed: $($_.Exception.Message)"
+                Start-Sleep -Seconds 3
+            }
+        }
+        if ($nssmExe) { break }
+    }
+
+    # Attempt 2: winget (uses its own CDN, so works even when nssm.cc is down).
+    if (-not $nssmExe -and (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Step 'nssm.cc unreachable; trying winget install NSSM.NSSM ...'
+        try {
+            & winget install --id NSSM.NSSM --silent --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
+        } catch { Write-Warn "winget failed: $($_.Exception.Message)" }
+        $wingetGlobs = @(
+            "$env:LOCALAPPDATA\Microsoft\WinGet\Links\nssm.exe",
+            "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\NSSM.NSSM*\*\win64\nssm.exe",
+            "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\NSSM.NSSM*\*\nssm.exe"
+        )
+        # Prefer the resolved command (robust to future WinGet layout changes);
+        # fall back to globbing the package store only if it is not on PATH yet.
+        $cmd = Get-Command 'nssm.exe' -ErrorAction SilentlyContinue
+        if ($cmd) { $nssmExe = $cmd.Source }
+        if (-not $nssmExe) {
+            foreach ($g in $wingetGlobs) {
+                $hit = Get-ChildItem -Path $g -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($hit) { $nssmExe = $hit.FullName; break }
+            }
+        }
+        if ($nssmExe) { Write-Ok "Obtained nssm via winget: $nssmExe" }
+    }
+
+    if (-not $nssmExe) {
+        throw @'
+Could not obtain nssm.exe automatically (nssm.cc may be down and winget did not yield it).
+Fix it one of these ways, then re-run the installer:
+  * winget install NSSM.NSSM
+  * Download nssm.exe from https://nssm.cc, then either drop it next to this script
+    or pass it explicitly:  .\install-monitor-web.ps1 -NssmPath C:\path\to\nssm.exe
+'@
     }
 }
 Write-Ok "nssm: $nssmExe"
