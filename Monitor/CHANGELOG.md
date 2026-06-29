@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning follo
 
 ## [Unreleased]
 
+## [1.2.5] - 2026-06-29
+
+### Fixed
+- **HIGH** `Install-ScheduledTask.ps1`: scheduled-task registration failed at
+  `Register-ScheduledTask` (line ~142). The `RepetitionDuration [TimeSpan]::MaxValue`
+  trigger is accepted by `New-ScheduledTaskTrigger` but rejected at *registration*
+  on some Windows builds, so the old try/catch (which wrapped only trigger
+  creation) never fired and registration threw. Registration now retries: attempt
+  `MaxValue` ("Indefinitely"), then fall back to a 10-year duration, throwing only
+  if both fail (surfacing the underlying error).
+
 ## [1.2.4] - 2026-06-29
 
 ### Added

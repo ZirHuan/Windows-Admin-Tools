@@ -106,24 +106,6 @@ $action = New-ScheduledTaskAction `
     -Argument $scriptArgs `
     -WorkingDirectory $ScriptFolder
 
-# RepetitionDuration: [TimeSpan]::MaxValue is rejected by Task Scheduler on some
-# Windows builds. Try it first (shows 'Indefinitely'), then fall back to a long
-# finite span (~10 years) which every build accepts.
-try {
-    $trigger = New-ScheduledTaskTrigger `
-        -Once `
-        -At (Get-Date) `
-        -RepetitionInterval  (New-TimeSpan -Minutes $IntervalMinutes) `
-        -RepetitionDuration  ([TimeSpan]::MaxValue)
-} catch {
-    Write-Host "  Note: [TimeSpan]::MaxValue rejected ($($_.Exception.Message)); using 10-year duration." -ForegroundColor Yellow
-    $trigger = New-ScheduledTaskTrigger `
-        -Once `
-        -At (Get-Date) `
-        -RepetitionInterval  (New-TimeSpan -Minutes $IntervalMinutes) `
-        -RepetitionDuration  (New-TimeSpan -Days 3650)
-}
-
 $settings = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit  (New-TimeSpan -Minutes 30) `
     -MultipleInstances   IgnoreNew `
@@ -139,15 +121,44 @@ if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
     Write-Host "Removed existing task '$TaskName'." -ForegroundColor Yellow
 }
 
-Register-ScheduledTask `
-    -TaskPath   $TaskFolder `
-    -TaskName   $TaskName `
-    -Action     $action `
-    -Trigger    $trigger `
-    -Settings   $settings `
-    -Principal  $principal `
-    -Description "Monitors services defined in monitor-config.json and alerts via email. ServiceMonitor.ps1 v$scriptVersion" |
-    Out-Null
+# RepetitionDuration [TimeSpan]::MaxValue shows 'Indefinitely' but is rejected at
+# REGISTRATION time on some Windows builds - the trigger object itself constructs
+# fine, so guarding only trigger creation does not help. Attempt registration with
+# MaxValue, then fall back to a long finite span (~10 years) that every build
+# accepts. Both the trigger build and Register-ScheduledTask run inside the try.
+$attempts = @(
+    @{ Label = 'indefinite (MaxValue)'; Duration = [TimeSpan]::MaxValue },
+    @{ Label = '10-year';               Duration = (New-TimeSpan -Days 3650) }
+)
+$registered = $false
+foreach ($a in $attempts) {
+    try {
+        $trigger = New-ScheduledTaskTrigger `
+            -Once `
+            -At (Get-Date) `
+            -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) `
+            -RepetitionDuration $a['Duration']
+        Register-ScheduledTask `
+            -TaskPath    $TaskFolder `
+            -TaskName    $TaskName `
+            -Action      $action `
+            -Trigger     $trigger `
+            -Settings    $settings `
+            -Principal   $principal `
+            -Description "Monitors services defined in monitor-config.json and alerts via email. ServiceMonitor.ps1 v$scriptVersion" `
+            -ErrorAction Stop | Out-Null
+        $registered = $true
+        if ($a['Label'] -ne 'indefinite (MaxValue)') {
+            Write-Host "  Note: used $($a['Label']) repetition duration (MaxValue not accepted on this build)." -ForegroundColor Yellow
+        }
+        break
+    } catch {
+        Write-Host "  Registration attempt ($($a['Label'])) failed: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+if (-not $registered) {
+    throw "Failed to register scheduled task '$TaskName'. See the messages above for the underlying error."
+}
 
 Write-Host ''
 Write-Host "Task '$TaskName' registered successfully." -ForegroundColor Green
