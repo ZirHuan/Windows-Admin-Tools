@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning follo
 
 ## [Unreleased]
 
+## [1.2.4] - 2026-06-29
+
+### Added
+- **Windows Event Log integration** in `ServiceMonitor.ps1`. WARNING and ERROR
+  messages (service down, not found, disabled, restart-attempt failures) are now
+  mirrored to the **Application** event log under source `ServiceMonitor`
+  (WARNING = EventId 2000, ERROR = 3000), and a successful restart writes an
+  Information event (EventId 1001, "recovered"). INFO chatter stays file-only to
+  keep the event log readable. The event source is created on first run (requires
+  admin / the SYSTEM scheduled-task account); if it cannot be created, file
+  logging continues and event writes are skipped gracefully.
+
 ## [1.2.3] - 2026-06-29
 
 ### Added

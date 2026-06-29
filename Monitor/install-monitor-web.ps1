@@ -38,7 +38,7 @@
     .\install-monitor-web.ps1 -Port 9090 -SkipMigration
 
 .NOTES
-    Version: 1.2.3
+    Version: 1.2.4
     To remove: nssm remove ServiceMonitorWeb confirm
 #>
 

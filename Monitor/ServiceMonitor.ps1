@@ -106,7 +106,7 @@
     Run as Administrator for full restart capability.
     Schedule via Install-ScheduledTask.ps1 for continuous monitoring.
     Config file managed by monitor_web.py web admin UI.
-    Version: 1.2.3
+    Version: 1.2.4
 #>
 
 [CmdletBinding()]
@@ -134,16 +134,49 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = '1.2.3'
+$ScriptVersion = '1.2.4'
 $Hostname      = $env:COMPUTERNAME
 
 $ServiceNamePattern = '^[A-Za-z0-9_.$ -]+$'
 
 $script:SmtpNetworkCredential = $null
 
+# Windows Application event log integration. Source is created on first run (needs
+# admin / SYSTEM - the scheduled task account qualifies). If creation fails, file
+# logging still works and event writes are skipped.
+$script:EventSource   = 'ServiceMonitor'
+$script:EventLogName  = 'Application'
+$script:EventLogReady = $false
+
 # ---------------------------------------------------------------------------
 # Log helpers
 # ---------------------------------------------------------------------------
+
+function Initialize-EventLog {
+    try {
+        if (-not [System.Diagnostics.EventLog]::SourceExists($script:EventSource)) {
+            [System.Diagnostics.EventLog]::CreateEventSource($script:EventSource, $script:EventLogName)
+        }
+        $script:EventLogReady = $true
+    } catch {
+        $script:EventLogReady = $false
+        Write-Warning "Event Log source unavailable (run as admin to enable): $_"
+    }
+}
+
+function Write-AppEvent {
+    param(
+        [ValidateSet('Information', 'Warning', 'Error')] [string] $EntryType,
+        [string] $Message,
+        [int]    $EventId = 1000
+    )
+    if (-not $script:EventLogReady) { return }
+    try {
+        [System.Diagnostics.EventLog]::WriteEntry(
+            $script:EventSource, $Message,
+            [System.Diagnostics.EventLogEntryType]::$EntryType, $EventId)
+    } catch { }
+}
 
 function Initialize-Log {
     $logDir = Split-Path -LiteralPath $LogFile
@@ -180,6 +213,12 @@ function Write-Log {
         'INFO'    { Write-Host $line -ForegroundColor Cyan }
         'WARNING' { Write-Host $line -ForegroundColor Yellow }
         'ERROR'   { Write-Host $line -ForegroundColor Red }
+    }
+    # Mirror actionable levels to the Windows Application event log (INFO is
+    # file-only to keep the event log readable). RECOVERED is logged explicitly.
+    switch ($Level) {
+        'WARNING' { Write-AppEvent -EntryType Warning -Message $Message -EventId 2000 }
+        'ERROR'   { Write-AppEvent -EntryType Error   -Message $Message -EventId 3000 }
     }
 }
 
@@ -506,6 +545,7 @@ function Invoke-ServiceRestart {
 # Main
 # ---------------------------------------------------------------------------
 
+Initialize-EventLog
 Initialize-Log
 Write-Log -Level INFO -Message "=== ServiceMonitor v$ScriptVersion starting on $Hostname ==="
 
@@ -651,6 +691,8 @@ foreach ($entry in $activeEntries) {
         $nowStatus = Get-ServiceRunningStatus -ServiceName $svcName
         if ($nowStatus -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
             Write-Log -Level INFO -Message "Service '$svcName' recovered on attempt $attempt."
+            Write-AppEvent -EntryType Information -EventId 1001 `
+                -Message "Service '$svcName' recovered on attempt $attempt/$MaxAttempts on $Hostname."
             if ($alertsTo.Count -gt 0) {
                 $body = New-AlertBody -ServiceName $svcName -Status 'RECOVERED' `
                                         -Attempt $attempt -ErrorDetail '' -AlertGroup $entry.Alerts
