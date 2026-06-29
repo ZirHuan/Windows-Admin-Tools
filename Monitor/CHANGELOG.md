@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning follo
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-06-29
+
+### Added
+- Per-deployment SMTP settings via `smtp.json`. `New-CredStore.ps1` now prompts
+  for (and stores) the SMTP **server**, plus port/from/useSsl, in `smtp.json`
+  alongside `smtp.key`/`smtp.cred`/`smtp.user` - so the relay can differ per
+  server instead of relying on a hardcoded default. `ServiceMonitor.ps1`
+  auto-loads `smtp.json` (new `-SmtpConfigFile` param; otherwise looked up next to
+  `-SmtpCredFile`, then beside the script). Explicit `-Smtp*` / `-FromAddress`
+  parameters still override the file. New-CredStore bumped to 1.2.0.
+
 ### Fixed
 - **HIGH** `install-monitor-web.ps1`: also install `python-multipart`. The web UI
   uses FastAPI `Form()` (the `/auth` token route); without `python-multipart`

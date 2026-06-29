@@ -64,6 +64,12 @@
 .PARAMETER SmtpUseSsl
     If specified, enables SSL/TLS for the SMTP connection.
 
+.PARAMETER SmtpConfigFile
+    Path to an smtp.json (written by New-CredStore.ps1) holding the per-deployment
+    SMTP settings (server, port, from, user, useSsl). If omitted, looks for
+    smtp.json next to -SmtpCredFile, then beside this script. Explicit -Smtp*
+    parameters always override the file.
+
 .PARAMETER MaxAttempts
     Number of restart attempts before marking the service as failed.
     Default: 3
@@ -100,7 +106,7 @@
     Run as Administrator for full restart capability.
     Schedule via Install-ScheduledTask.ps1 for continuous monitoring.
     Config file managed by monitor_web.py web admin UI.
-    Version: 1.2.2
+    Version: 1.2.3
 #>
 
 [CmdletBinding()]
@@ -117,6 +123,7 @@ param(
     [string] $SmtpCredFile         = '',
     [string] $SmtpKeyFile          = '',
     [switch] $SmtpUseSsl,
+    [string] $SmtpConfigFile        = '',
     [int]    $MaxAttempts          = 3,
     [int]    $AttemptDelaySeconds  = 60,
     [int]    $StartSettleSeconds   = 8,
@@ -127,7 +134,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = '1.2.2'
+$ScriptVersion = '1.2.3'
 $Hostname      = $env:COMPUTERNAME
 
 $ServiceNamePattern = '^[A-Za-z0-9_.$ -]+$'
@@ -501,6 +508,26 @@ function Invoke-ServiceRestart {
 
 Initialize-Log
 Write-Log -Level INFO -Message "=== ServiceMonitor v$ScriptVersion starting on $Hostname ==="
+
+# Load per-deployment SMTP settings (server/port/from/user/ssl) written by
+# New-CredStore.ps1, so each server uses its own relay without editing the script.
+# Explicit -Smtp* / -FromAddress parameters always win; the file fills the rest.
+$smtpCfgPath = if ($SmtpConfigFile)    { $SmtpConfigFile }
+               elseif ($SmtpCredFile)  { Join-Path ([System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($SmtpCredFile))) 'smtp.json' }
+               else                    { Join-Path $PSScriptRoot 'smtp.json' }
+if (Test-Path -LiteralPath $smtpCfgPath) {
+    try {
+        $smtpCfg = Get-Content -LiteralPath $smtpCfgPath -Raw | ConvertFrom-Json
+        if ((Get-Prop $smtpCfg 'server') -and -not $PSBoundParameters.ContainsKey('SmtpServer'))  { $SmtpServer  = [string]$smtpCfg.server }
+        if ((Get-Prop $smtpCfg 'port')   -and -not $PSBoundParameters.ContainsKey('SmtpPort'))    { $SmtpPort    = [int]   $smtpCfg.port }
+        if ((Get-Prop $smtpCfg 'from')   -and -not $PSBoundParameters.ContainsKey('FromAddress')) { $FromAddress = [string]$smtpCfg.from }
+        if ((Get-Prop $smtpCfg 'user')   -and -not $PSBoundParameters.ContainsKey('SmtpUser'))    { $SmtpUser    = [string]$smtpCfg.user }
+        if ((Get-Prop $smtpCfg 'useSsl') -and -not $PSBoundParameters.ContainsKey('SmtpUseSsl'))  { $SmtpUseSsl  = [switch]([bool]$smtpCfg.useSsl) }
+        Write-Log -Level INFO -Message "Loaded SMTP settings from ${smtpCfgPath} (server ${SmtpServer}:${SmtpPort}, ssl: $($SmtpUseSsl.IsPresent))"
+    } catch {
+        Write-Log -Level WARNING -Message "Failed to read SMTP config ${smtpCfgPath}: $_"
+    }
+}
 
 Initialize-SmtpCredential
 Import-MonitorConfig

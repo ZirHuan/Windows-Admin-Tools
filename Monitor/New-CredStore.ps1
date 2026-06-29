@@ -11,6 +11,9 @@
         smtp.key   - the AES-256 key (32 bytes, binary)
         smtp.cred  - the AES-encrypted password (base64 text)
         smtp.user  - the SMTP username (plaintext - usernames are not secret)
+        smtp.json  - per-deployment SMTP settings: server, port, from, user, useSsl
+                     (no secrets). ServiceMonitor.ps1 auto-loads this from next to
+                     the cred file, so the relay can differ per server.
 
     The .key file is protected with NTFS ACLs (SYSTEM + Administrators only).
     Anyone who obtains the .key file can decrypt the password - guard it accordingly.
@@ -43,13 +46,17 @@
     Encryption uses ConvertFrom-SecureString with an explicit 256-bit key (cross-platform;
     does NOT use DPAPI, so the credential files are portable between machines that
     share the same .key file).
-    Version: 1.1.0
+    Version: 1.2.0
 #>
 
 [CmdletBinding()]
 param(
     [string] $OutputFolder = $PSScriptRoot,
     [string] $SmtpUser     = '',
+    [string] $SmtpServer   = '',
+    [int]    $SmtpPort     = 25,
+    [string] $FromAddress  = '',
+    [switch] $SmtpUseSsl,
     [switch] $Force
 )
 
@@ -58,10 +65,11 @@ $ErrorActionPreference = 'Stop'
 $keyFile  = Join-Path $OutputFolder 'smtp.key'
 $credFile = Join-Path $OutputFolder 'smtp.cred'
 $userFile = Join-Path $OutputFolder 'smtp.user'
+$jsonFile = Join-Path $OutputFolder 'smtp.json'
 
 # Guard against accidental overwrite
 if (-not $Force) {
-    foreach ($f in @($keyFile, $credFile, $userFile)) {
+    foreach ($f in @($keyFile, $credFile, $userFile, $jsonFile)) {
         if (Test-Path -LiteralPath $f) {
             $answer = Read-Host "File exists: $f  Overwrite? [y/N]"
             if ($answer -notmatch '^[Yy]') {
@@ -82,6 +90,15 @@ if (-not $SmtpUser) {
 }
 if (-not $SmtpUser) {
     throw 'SMTP username cannot be empty.'
+}
+
+# SMTP server differs per deployment, so capture it here and store it alongside
+# the credential (in smtp.json) rather than relying on a script default.
+if (-not $SmtpServer) {
+    $SmtpServer = Read-Host 'SMTP server (hostname or IP)'
+}
+if (-not $SmtpServer) {
+    throw 'SMTP server cannot be empty.'
 }
 
 $secPwd    = Read-Host 'SMTP password' -AsSecureString
@@ -122,11 +139,25 @@ $encrypted = ConvertFrom-SecureString -SecureString $secPwd -Key $key
 [System.IO.File]::WriteAllText($credFile, $encrypted)
 [System.IO.File]::WriteAllText($userFile, $SmtpUser)
 
+# Per-deployment SMTP settings (no secrets here - just connection details).
+# ServiceMonitor.ps1 auto-loads this file from next to the cred file. Written
+# without a BOM so ConvertFrom-Json is happy on Windows PowerShell 5.1.
+$smtpSettings = [ordered]@{
+    server = $SmtpServer
+    port   = $SmtpPort
+    from   = $FromAddress
+    user   = $SmtpUser
+    useSsl = [bool]$SmtpUseSsl
+}
+$json = $smtpSettings | ConvertTo-Json
+[System.IO.File]::WriteAllText($jsonFile, $json, (New-Object System.Text.UTF8Encoding($false)))
+
 Write-Host ''
 Write-Host 'Files written:' -ForegroundColor Cyan
 Write-Host "  Key  : $keyFile"
 Write-Host "  Cred : $credFile"
 Write-Host "  User : $userFile"
+Write-Host "  Json : $jsonFile  (server $SmtpServer`:$SmtpPort, ssl: $([bool]$SmtpUseSsl))"
 
 # Restrict ACL on key file: SYSTEM + Administrators only
 try {
@@ -167,9 +198,10 @@ try {
 
 Write-Host ''
 Write-Host 'Usage with ServiceMonitor.ps1:' -ForegroundColor Cyan
-Write-Host "  -SmtpUser '$SmtpUser' ``"
-Write-Host "  -SmtpKeyFile '$keyFile' ``"
-Write-Host "  -SmtpCredFile '$credFile'"
+Write-Host '  ServiceMonitor.ps1 auto-loads smtp.json (server/port/from/user/ssl)'
+Write-Host '  from next to the cred file, so you only need:'
+Write-Host "    -SmtpKeyFile '$keyFile' ``"
+Write-Host "    -SmtpCredFile '$credFile'"
 Write-Host ''
 Write-Host 'Test connectivity before scheduling:'
-Write-Host "  .\ServiceMonitor.ps1 -TestEmail -SmtpUser '$SmtpUser' -SmtpKeyFile '$keyFile' -SmtpCredFile '$credFile'"
+Write-Host "  .\ServiceMonitor.ps1 -TestEmail -SmtpKeyFile '$keyFile' -SmtpCredFile '$credFile'"
