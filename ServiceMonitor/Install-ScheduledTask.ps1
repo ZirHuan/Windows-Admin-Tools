@@ -48,7 +48,7 @@
 
 [CmdletBinding()]
 param(
-    [string] $ScriptFolder    = $PSScriptRoot,
+    [string] $ScriptFolder    = '',
     [int]    $IntervalMinutes = 5,
     [string] $TaskName        = 'ServiceMonitor',
     [string] $TaskFolder      = '\',
@@ -65,9 +65,22 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# $PSScriptRoot is empty inside param() when launched via 'powershell.exe -File'
+# (Explorer's "Run with PowerShell", some RMM agents) - resolve at body scope.
+if (-not $ScriptFolder) {
+    $ScriptFolder = if     ($PSScriptRoot)  { $PSScriptRoot }
+                    elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath }
+                    else { throw 'Cannot resolve the script folder - pass -ScriptFolder explicitly.' }
+}
+
 if ($IntervalMinutes -lt 1) {
     throw "IntervalMinutes must be >= 1 (got $IntervalMinutes)."
 }
+
+# Task Scheduler expects TaskPath as '\Folder\' - a user passing 'Monitoring'
+# or '\Monitoring' would otherwise fail the exists-check and registration.
+if (-not $TaskFolder.StartsWith('\')) { $TaskFolder = '\' + $TaskFolder }
+if (-not $TaskFolder.EndsWith('\'))   { $TaskFolder = $TaskFolder + '\' }
 
 $scriptPath = Join-Path $ScriptFolder 'ServiceMonitor.ps1'
 if (-not (Test-Path -LiteralPath $scriptPath)) {
@@ -93,7 +106,9 @@ Write-Host "  PowerShell: $psLabel"
 
 # Build the script arguments, appending SMTP auth flags only when provided so
 # authenticated relay is actually wired into the SYSTEM task (not dead config).
-$scriptArgs = "-NonInteractive -ExecutionPolicy Bypass -File `"$scriptPath`""
+# -NoProfile: without it, SYSTEM loads the all-users profile every run - an
+# unnecessary delay and a code-execution-as-SYSTEM hook if the profile is bad.
+$scriptArgs = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$scriptPath`""
 if ($SmtpUser)     { $scriptArgs += " -SmtpUser `"$SmtpUser`"" }
 if ($SmtpCredFile) { $scriptArgs += " -SmtpCredFile `"$SmtpCredFile`"" }
 if ($SmtpKeyFile)  { $scriptArgs += " -SmtpKeyFile `"$SmtpKeyFile`"" }
@@ -106,19 +121,29 @@ $action = New-ScheduledTaskAction `
     -Argument $scriptArgs `
     -WorkingDirectory $ScriptFolder
 
+# -AllowStartIfOnBatteries / -DontStopIfGoingOnBatteries are ESSENTIAL for a
+# 24/7 SYSTEM monitor: New-ScheduledTaskSettingsSet defaults both battery flags
+# to blocking, so on a laptop OR a VM that reports its power source as DC/battery
+# the task sits perpetually in state 'Queued' - LastTaskResult stays 0 while the
+# process is never launched, no log is written, and nothing is monitored. (Cost
+# a real deployment: a stopped service went unrestarted/unalerted for 2 h.)
 $settings = New-ScheduledTaskSettingsSet `
-    -ExecutionTimeLimit  (New-TimeSpan -Minutes 30) `
-    -MultipleInstances   IgnoreNew `
-    -StartWhenAvailable
+    -ExecutionTimeLimit        (New-TimeSpan -Minutes 30) `
+    -MultipleInstances         IgnoreNew `
+    -StartWhenAvailable `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries
 
 $principal = New-ScheduledTaskPrincipal `
     -UserId    'SYSTEM' `
     -LogonType ServiceAccount `
     -RunLevel  Highest
 
-if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-    Write-Host "Removed existing task '$TaskName'." -ForegroundColor Yellow
+# Scope the exists-check to $TaskFolder: a bare -TaskName match would find (and
+# remove) a same-named task in a DIFFERENT task folder than the one we target.
+if (Get-ScheduledTask -TaskPath $TaskFolder -TaskName $TaskName -ErrorAction SilentlyContinue) {
+    Unregister-ScheduledTask -TaskPath $TaskFolder -TaskName $TaskName -Confirm:$false
+    Write-Host "Removed existing task '$TaskFolder$TaskName'." -ForegroundColor Yellow
 }
 
 # RepetitionDuration [TimeSpan]::MaxValue shows 'Indefinitely' but is rejected at

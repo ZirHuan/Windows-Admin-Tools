@@ -1,0 +1,13 @@
+# Python build artifacts
+__pycache__/
+*.py[cod]
+
+# Release bundles (built from source; not tracked)
+*.zip
+
+# Local scratch / superseded copies
+ServiceMonitor/fixed/
+
+# Local agent + tooling state
+.claude/
+actionlint

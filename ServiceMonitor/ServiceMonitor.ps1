@@ -20,8 +20,9 @@
 .PARAMETER ConfigFile
     Path to monitor-config.json managed by the web admin UI.
     Default: .\monitor-config.json
-    If this file does not exist, the script falls back to -ServicesFile and
-    -RecipientsFile for backward compatibility.
+    If OMITTED and the default file does not exist, the script falls back to
+    -ServicesFile and -RecipientsFile for backward compatibility. An explicitly
+    passed -ConfigFile that does not exist is a fatal error (no silent fallback).
 
 .PARAMETER ServicesFile
     Legacy: Path to text file listing service names. Used only when ConfigFile
@@ -82,6 +83,20 @@
     Seconds to wait after issuing a start command before re-checking status.
     Default: 8
 
+.PARAMETER AlertCooldownMinutes
+    Minimum minutes between repeat alert emails for the same service and
+    condition (down / restart failed / not found / disabled / invalid name),
+    so a service that stays broken does not flood the inbox every run.
+    RECOVERED alerts always send and reset the cooldown for that service.
+    0 disables the cooldown (alert on every run). Default: 60
+
+.PARAMETER RunBudgetMinutes
+    Soft time budget for a single run. Once exceeded, remaining stopped
+    services are still detected and alerted, but restart attempts are skipped
+    until the next run - so many simultaneously failed services cannot push
+    the run past the scheduled task's execution time limit.
+    0 disables the budget (never skip restarts). Default: 20
+
 .PARAMETER NoEmail
     Suppresses all email sending (useful for local testing).
 
@@ -106,15 +121,19 @@
     Run as Administrator for full restart capability.
     Schedule via Install-ScheduledTask.ps1 for continuous monitoring.
     Config file managed by monitor_web.py web admin UI.
-    Version: 1.2.5
+    Exit codes: 0 = all monitored services OK (or recovered / nothing to check)
+                1 = fatal script error (bad config, unwritable log, unhandled)
+                2 = run completed, but at least one service failed
+                    (not found / disabled / restart failed)
+    Version: 1.3.0
 #>
 
 [CmdletBinding()]
 param(
-    [string] $ConfigFile           = (Join-Path $PSScriptRoot 'monitor-config.json'),
-    [string] $ServicesFile         = (Join-Path $PSScriptRoot 'services.txt'),
-    [string] $RecipientsFile       = (Join-Path $PSScriptRoot 'recipients.txt'),
-    [string] $LogFile              = (Join-Path $PSScriptRoot 'ServiceMonitor.log'),
+    [string] $ConfigFile           = '',
+    [string] $ServicesFile         = '',
+    [string] $RecipientsFile       = '',
+    [string] $LogFile              = '',
     [int]    $LogMaxSizeMB         = 10,
     [string] $SmtpServer           = '192.168.2.15',
     [int]    $SmtpPort             = 25,
@@ -127,6 +146,8 @@ param(
     [int]    $MaxAttempts          = 3,
     [int]    $AttemptDelaySeconds  = 60,
     [int]    $StartSettleSeconds   = 8,
+    [int]    $AlertCooldownMinutes = 60,
+    [int]    $RunBudgetMinutes     = 20,
     [switch] $NoEmail,
     [switch] $TestEmail
 )
@@ -134,7 +155,73 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ScriptVersion = '1.2.5'
+# Remember whether -ConfigFile was passed explicitly: an explicit path that does
+# not exist must be a fatal error, never a silent fallback to legacy files.
+$script:ExplicitConfigFile = $PSBoundParameters.ContainsKey('ConfigFile')
+
+# Resolve the script's own directory robustly. $PSScriptRoot is EMPTY inside the
+# param() block when the script is launched via 'powershell.exe -File ...' (e.g. the
+# SYSTEM scheduled task), which made the old Join-Path defaults throw before any
+# logging could start. Resolve here, after param binding, with layered fallbacks.
+# If nothing resolves (script text piped / Invoke-Expression), FAIL HARD rather
+# than guess a directory - a monitor silently running from the wrong folder
+# (e.g. C:\Windows\system32 under SYSTEM) is worse than one that stops loudly.
+$ScriptDir = $null
+if     ($PSScriptRoot)  { $ScriptDir = $PSScriptRoot }
+elseif ($PSCommandPath) { $ScriptDir = Split-Path -Parent $PSCommandPath }
+else {
+    # StrictMode-safe: MyCommand may be a type without a Path property here.
+    $mc = $MyInvocation.MyCommand
+    if ($mc -and $mc.PSObject.Properties['Path'] -and $mc.Path) {
+        $ScriptDir = Split-Path -Parent $mc.Path
+    }
+}
+if (-not $ScriptDir) {
+    throw 'Cannot resolve the script directory (script not run from a file). Pass -ConfigFile and -LogFile explicitly.'
+}
+
+if (-not $ConfigFile)     { $ConfigFile     = Join-Path $ScriptDir 'monitor-config.json' }
+if (-not $ServicesFile)   { $ServicesFile   = Join-Path $ScriptDir 'services.txt' }
+if (-not $RecipientsFile) { $RecipientsFile = Join-Path $ScriptDir 'recipients.txt' }
+if (-not $LogFile)        { $LogFile        = Join-Path $ScriptDir 'ServiceMonitor.log' }
+
+# Normalize to absolute paths. Several code paths use .NET file APIs, which
+# resolve relative paths against the PROCESS working directory, not the
+# PowerShell location - a relative -LogFile would otherwise land elsewhere.
+$ConfigFile     = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ConfigFile)
+$ServicesFile   = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ServicesFile)
+$RecipientsFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($RecipientsFile)
+$LogFile        = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LogFile)
+# The SMTP file params default to '' (no cred store) - normalizing an empty
+# string throws, so only normalize when set.
+if ($SmtpCredFile)   { $SmtpCredFile   = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SmtpCredFile) }
+if ($SmtpKeyFile)    { $SmtpKeyFile    = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SmtpKeyFile) }
+if ($SmtpConfigFile) { $SmtpConfigFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SmtpConfigFile) }
+
+# Alert cooldown state lives next to the script (see Test-AlertDue below).
+$script:StateFile = Join-Path $ScriptDir 'ServiceMonitor.state.json'
+
+# Last-resort error visibility. Any terminating error that escapes to script
+# scope is appended to the log and mirrored to the Application event log before
+# exiting 1. Without this, a SYSTEM scheduled-task run dies with only stderr
+# output that nobody can see (the exact failure mode debugged in v1.2.9).
+trap {
+    $fatalMsg = "FATAL: unhandled error - $_"
+    try {
+        $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        Add-Content -LiteralPath $LogFile -Value "$stamp [ERROR  ] $fatalMsg" -Encoding UTF8
+    } catch { }
+    try {
+        if ([System.Diagnostics.EventLog]::SourceExists('ServiceMonitor')) {
+            [System.Diagnostics.EventLog]::WriteEntry('ServiceMonitor', $fatalMsg,
+                [System.Diagnostics.EventLogEntryType]::Error, 3001)
+        }
+    } catch { }
+    Write-Error -Message $fatalMsg -ErrorAction Continue
+    exit 1
+}
+
+$ScriptVersion = '1.3.0'
 $Hostname      = $env:COMPUTERNAME
 
 $ServiceNamePattern = '^[A-Za-z0-9_.$ -]+$'
@@ -195,7 +282,10 @@ function Initialize-Log {
             }
         }
     }
-    try { Add-Content -LiteralPath $LogFile -Value '' -Encoding UTF8 }
+    # Zero-length append: verifies writability (and creates the file if missing)
+    # without adding a blank line to the log on every run. $LogFile is already
+    # normalized to an absolute path, so the .NET call is safe here.
+    try { [System.IO.File]::AppendAllText($LogFile, '') }
     catch { throw "Log file '$LogFile' is not writable: $_" }
 }
 
@@ -251,6 +341,12 @@ function Get-Prop {
 }
 
 function Import-MonitorConfig {
+    # An explicitly passed -ConfigFile that does not exist is an operator error
+    # (typo in the task action). Falling back to a possibly-stale services.txt
+    # would silently monitor the wrong set forever - fail loudly instead.
+    if ($script:ExplicitConfigFile -and -not (Test-Path -LiteralPath $ConfigFile)) {
+        throw "Config file explicitly specified but not found: $ConfigFile"
+    }
     if (Test-Path -LiteralPath $ConfigFile) {
         # --- JSON mode ---
         Write-Log -Level INFO -Message "Loading config from: $ConfigFile"
@@ -360,12 +456,15 @@ function Send-Alert {
     )
     if ($NoEmail) {
         Write-Log -Level INFO -Message "[NoEmail] Would send: $Subject"
-        return
+        return $true
     }
-    $rcptArray = @($Recipients | Where-Object { $_ -match '@' })
+    # Case-insensitive dedup: 'both' merges the dev+iver lists, and
+    # User@x.com / user@x.com must not receive the alert twice.
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $rcptArray = @($Recipients | Where-Object { $_ -match '@' -and $seen.Add($_) })
     if ($rcptArray.Count -eq 0) {
         Write-Log -Level WARNING -Message 'No recipients for this alert - skipping email.'
-        return
+        return $false
     }
     $smtp = $null
     $msg  = $null
@@ -385,12 +484,99 @@ function Send-Alert {
         foreach ($addr in $rcptArray) { $msg.To.Add($addr) }
         $smtp.Send($msg)
         Write-Log -Level INFO -Message "Alert sent to: $($rcptArray -join ', ')"
+        return $true
     } catch {
         Write-Log -Level ERROR -Message "Failed to send email alert: $_"
+        return $false
     } finally {
         # Dispose even if Send threw, so sockets/handles are not leaked
         if ($null -ne $msg)  { $msg.Dispose() }
         if ($null -ne $smtp) { $smtp.Dispose() }
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Alert cooldown state - prevents an alert storm when a service stays broken.
+# State is a small JSON map of 'service|condition' -> last-alerted timestamp.
+# A repeat alert for the same key is suppressed until AlertCooldownMinutes has
+# passed. RECOVERED / OK clears the service's keys so a NEW failure after a
+# recovery always alerts immediately.
+# ---------------------------------------------------------------------------
+
+function Get-AlertState {
+    $state = @{}
+    if (Test-Path -LiteralPath $script:StateFile) {
+        try {
+            $raw = Get-Content -LiteralPath $script:StateFile -Raw | ConvertFrom-Json
+            foreach ($p in $raw.PSObject.Properties) { $state[$p.Name] = [string]$p.Value }
+        } catch {
+            Write-Log -Level WARNING -Message "Alert state file unreadable - starting fresh: $_"
+        }
+    }
+    return $state
+}
+
+function Save-AlertState {
+    param([hashtable] $State)
+    try {
+        if ($State.Count -eq 0) {
+            if (Test-Path -LiteralPath $script:StateFile) {
+                Remove-Item -LiteralPath $script:StateFile -Force
+            }
+        } else {
+            # UTF8, not ASCII: a service name containing non-ASCII letters (for
+            # example a Swedish A-ring) written as ASCII is mangled to '?', the
+            # key never matches on the next run,
+            # and the cooldown never suppresses - a permanent alert storm.
+            $State | ConvertTo-Json | Set-Content -LiteralPath $script:StateFile -Encoding UTF8
+        }
+    } catch {
+        Write-Log -Level WARNING -Message "Alert state file write failed: $_"
+    }
+}
+
+function Test-AlertDue {
+    # Check only - does NOT stamp. The timestamp is committed by Set-AlertSent
+    # after Send-Alert reports success; stamping here would suppress the next
+    # alert for a full cooldown window even when the send FAILED (SMTP blip),
+    # silently losing the first alert of an outage.
+    param([string] $Key)
+    if ($AlertCooldownMinutes -le 0) { return $true }
+    $state = Get-AlertState
+    if ($state.ContainsKey($Key)) {
+        # Timestamps are saved in round-trip ('o') format; parse invariant so
+        # the system locale (e.g. sv-SE under SYSTEM) cannot break comparison.
+        $last = [datetime]::MinValue
+        $parsed = [datetime]::TryParse($state[$Key],
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind, [ref]$last)
+        if ($parsed -and (Get-Date) -lt $last.AddMinutes($AlertCooldownMinutes)) {
+            Write-Log -Level INFO -Message "Alert '$Key' suppressed (cooldown $AlertCooldownMinutes min, last sent $($state[$Key]))."
+            return $false
+        }
+    }
+    return $true
+}
+
+function Set-AlertSent {
+    # Commit the cooldown timestamp - call ONLY after a successful send.
+    # Never under -NoEmail: a simulated send must not suppress the scheduled
+    # task's next real alert.
+    param([string] $Key)
+    if ($AlertCooldownMinutes -le 0 -or $NoEmail) { return }
+    $state = Get-AlertState
+    $state[$Key] = (Get-Date).ToString('o')
+    Save-AlertState -State $state
+}
+
+function Clear-AlertState {
+    param([string] $ServiceName)
+    $state = Get-AlertState
+    $keys = @($state.Keys | Where-Object { $_ -like "$ServiceName|*" })
+    if ($keys.Count -gt 0) {
+        foreach ($k in $keys) { $state.Remove($k) }
+        Save-AlertState -State $state
+        Write-Log -Level INFO -Message "Alert cooldown cleared for '$ServiceName'."
     }
 }
 
@@ -425,7 +611,11 @@ function New-AlertBody {
     }
     if (Test-Path -LiteralPath $LogFile) {
         try {
-            $tail = @([System.IO.File]::ReadAllLines($LogFile) | Select-Object -Last 20)
+            # Filter 'Alert sent to:' lines: a dev-only alert body must not leak
+            # the iver group's addresses (and vice versa) via the log tail.
+            $tail = @([System.IO.File]::ReadAllLines($LogFile) |
+                      Where-Object { $_ -notmatch 'Alert sent to' } |
+                      Select-Object -Last 20)
             if ($tail.Count -gt 0) {
                 $lines += ''
                 $lines += '--- Recent Log (last 20 lines) ---'
@@ -483,6 +673,9 @@ function ConvertFrom-LegacyServices {
 
 function Get-ServiceStartupType {
     param([string] $ServiceName)
+    # Safe by construction: the name is interpolated into a WQL filter below, so
+    # guard here too instead of relying on the caller having validated it.
+    if ($ServiceName -notmatch $ServiceNamePattern) { return 'Unknown' }
     $wmi = Get-CimInstance -ClassName Win32_Service -Filter "Name='$ServiceName'" -ErrorAction SilentlyContinue
     if ($null -eq $wmi) { return 'Unknown' }
     return $wmi.StartMode
@@ -513,8 +706,23 @@ function Wait-ServiceState {
 function Invoke-ServiceRestart {
     param([string] $ServiceName)
     $result = @{ Success = $false; ErrorText = '' }
+    # Safe by construction: the name reaches sc.exe below, so guard here too.
+    if ($ServiceName -notmatch $ServiceNamePattern) {
+        $result.ErrorText = "Invalid service name rejected: '$ServiceName'"
+        return $result
+    }
     try {
         $status = Get-ServiceRunningStatus -ServiceName $ServiceName
+        # A StopPending service is already on its way down (e.g. an admin's slow
+        # manual restart). Issuing a start now fails instantly and produces false
+        # RESTART FAILED alerts - wait for Stopped first, then proceed.
+        if ($status -eq [System.ServiceProcess.ServiceControllerStatus]::StopPending) {
+            Write-Log -Level INFO -Message "'$ServiceName' is StopPending - waiting up to 60 s for it to stop..."
+            $null = Wait-ServiceState -ServiceName $ServiceName `
+                -TargetState ([System.ServiceProcess.ServiceControllerStatus]::Stopped) `
+                -TimeoutSeconds 60
+            $status = Get-ServiceRunningStatus -ServiceName $ServiceName
+        }
         if ($null -ne $status -and $status -notin @(
             [System.ServiceProcess.ServiceControllerStatus]::Stopped,
             [System.ServiceProcess.ServiceControllerStatus]::StopPending
@@ -528,8 +736,17 @@ function Invoke-ServiceRestart {
                 Write-Log -Level WARNING -Message $result.ErrorText
             }
         }
-        $scOutput = @(& sc.exe start $ServiceName 2>&1)
-        $exitCode = $LASTEXITCODE
+        # sc.exe can write to stderr; with $ErrorActionPreference='Stop' a 2>&1
+        # capture would turn that into a terminating NativeCommandError before
+        # $LASTEXITCODE is read. Capture under 'Continue', judge by exit code.
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $scOutput = @(& sc.exe start $ServiceName 2>&1)
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $prevEAP
+        }
         if ($exitCode -ne 0) {
             $result.ErrorText = "sc.exe exit $exitCode - $($scOutput -join ' ')"
         } else {
@@ -554,7 +771,7 @@ Write-Log -Level INFO -Message "=== ServiceMonitor v$ScriptVersion starting on $
 # Explicit -Smtp* / -FromAddress parameters always win; the file fills the rest.
 $smtpCfgPath = if ($SmtpConfigFile)    { $SmtpConfigFile }
                elseif ($SmtpCredFile)  { Join-Path ([System.IO.Path]::GetDirectoryName([System.IO.Path]::GetFullPath($SmtpCredFile))) 'smtp.json' }
-               else                    { Join-Path $PSScriptRoot 'smtp.json' }
+               else                    { Join-Path $ScriptDir 'smtp.json' }
 if (Test-Path -LiteralPath $smtpCfgPath) {
     try {
         $smtpCfg = Get-Content -LiteralPath $smtpCfgPath -Raw | ConvertFrom-Json
@@ -581,11 +798,17 @@ if ($TestEmail) {
     $body = New-AlertBody -ServiceName '(test)' -Status 'TEST ALERT' -Attempt 0 `
                             -ErrorDetail 'This is a connectivity test sent by -TestEmail. No services were checked.' `
                             -AlertGroup 'both'
-    Send-Alert -Recipients $script:AllRecipients `
+    $sent = Send-Alert -Recipients $script:AllRecipients `
                -Subject "[ServiceMonitor] TEST: connectivity check from $Hostname" `
                -Body $body
-    Write-Log -Level INFO -Message '=== TestEmail complete ==='
-    exit 0
+    if ($sent) {
+        Write-Log -Level INFO -Message '=== TestEmail complete ==='
+        exit 0
+    }
+    # A test that could not send must not report success - operators script
+    # against this exit code to verify SMTP before scheduling.
+    Write-Log -Level ERROR -Message '=== TestEmail FAILED - see the error above ==='
+    exit 1
 }
 
 # Note: build the name lists with ForEach-Object (not .Name member access) so an
@@ -599,12 +822,28 @@ $activeNames = @($activeEntries | ForEach-Object { $_.Name }) -join ', '
 Write-Log -Level INFO -Message "Active services to check ($(@($activeEntries).Count)): $activeNames"
 
 if (@($activeEntries).Count -eq 0) {
-    Write-Log -Level ERROR -Message 'No active services to check - exiting.'
-    exit 1
+    # Not an error: a fresh install has zero services until the operator adds
+    # them in the web UI, and pausing everything during maintenance is a
+    # deliberate choice. Exiting 1 here spammed Error events every 5 minutes.
+    if (@($script:ServiceEntries).Count -gt 0) {
+        Write-Log -Level INFO -Message 'All services are paused - nothing to check this run.'
+    } else {
+        Write-Log -Level WARNING -Message 'No services configured yet - add services in the web admin UI.'
+    }
+    exit 0
 }
 
 # Check each service
 $failureCount = 0
+
+# Soft time budget: with many simultaneously failed services the serial restart
+# loops (attempts + delays + SMTP timeouts) could exceed the scheduled task's
+# 30-minute execution limit and get killed mid-run. Past the budget, remaining
+# down services are still detected and alerted but not restarted this run.
+# 0 (or negative) disables the budget. AddMinutes would make the deadline
+# 'now' and skip every restart - MaxValue means 'never'.
+$runDeadline = if ($RunBudgetMinutes -le 0) { [datetime]::MaxValue }
+               else { (Get-Date).AddMinutes($RunBudgetMinutes) }
 
 foreach ($entry in $activeEntries) {
     $svcName   = $entry.Name
@@ -614,7 +853,16 @@ foreach ($entry in $activeEntries) {
     $alertsTo  = @(Get-AlertRecipients -AlertsValue $entry.Alerts)
 
     if ($svcName -notmatch $ServiceNamePattern) {
-        Write-Log -Level ERROR -Message "Rejected invalid service name: '$svcName'."
+        $msg = "Rejected invalid service name: '$svcName' - fix the entry in the web admin."
+        Write-Log -Level ERROR -Message $msg
+        if ($alertsTo.Count -gt 0 -and (Test-AlertDue -Key "$svcName|invalid")) {
+            $body = New-AlertBody -ServiceName $svcName -Status 'INVALID NAME rejected' -Attempt 0 `
+                                    -ErrorDetail $msg -AlertGroup $entry.Alerts
+            if (Send-Alert -Recipients $alertsTo `
+                    -Subject "[ServiceMonitor] ERROR: invalid service name in config on $Hostname" -Body $body) {
+                Set-AlertSent -Key "$svcName|invalid"
+            }
+        }
         $failureCount++
         continue
     }
@@ -625,11 +873,13 @@ foreach ($entry in $activeEntries) {
     if ($null -eq $svcObj) {
         $msg  = "Service '$svcName' not found on $Hostname - verify the name in the web admin."
         Write-Log -Level ERROR -Message $msg
-        if ($alertsTo.Count -gt 0) {
+        if ($alertsTo.Count -gt 0 -and (Test-AlertDue -Key "$svcName|notfound")) {
             $body = New-AlertBody -ServiceName $svcName -Status 'NOT FOUND on host' -Attempt 0 `
                                     -ErrorDetail $msg -AlertGroup $entry.Alerts
-            Send-Alert -Recipients $alertsTo `
-                       -Subject "[ServiceMonitor] ERROR: $svcName not found on $Hostname" -Body $body
+            if (Send-Alert -Recipients $alertsTo `
+                    -Subject "[ServiceMonitor] ERROR: $svcName not found on $Hostname" -Body $body) {
+                Set-AlertSent -Key "$svcName|notfound"
+            }
         }
         $failureCount++
         continue
@@ -641,6 +891,7 @@ foreach ($entry in $activeEntries) {
             -TargetState ([System.ServiceProcess.ServiceControllerStatus]::Running) -TimeoutSeconds 30
         if ($started) {
             Write-Log -Level INFO -Message "OK: '$svcName' reached Running (was StartPending)."
+            Clear-AlertState -ServiceName $svcName
             continue
         }
         Write-Log -Level WARNING -Message "'$svcName' still not Running after 30 s - proceeding with restart logic."
@@ -649,6 +900,7 @@ foreach ($entry in $activeEntries) {
     $currentStatus = Get-ServiceRunningStatus -ServiceName $svcName
     if ($currentStatus -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
         Write-Log -Level INFO -Message "OK: '$svcName' is running."
+        Clear-AlertState -ServiceName $svcName
         continue
     }
 
@@ -656,11 +908,13 @@ foreach ($entry in $activeEntries) {
     if ($startupType -eq 'Disabled') {
         $msg = "Service '$svcName' is DISABLED. Manual intervention required - skipping restart."
         Write-Log -Level ERROR -Message $msg
-        if ($alertsTo.Count -gt 0) {
+        if ($alertsTo.Count -gt 0 -and (Test-AlertDue -Key "$svcName|disabled")) {
             $body = New-AlertBody -ServiceName $svcName -Status 'DOWN - StartupType=Disabled' `
                                     -Attempt 0 -ErrorDetail $msg -AlertGroup $entry.Alerts
-            Send-Alert -Recipients $alertsTo `
-                       -Subject "[ServiceMonitor] ERROR: $svcName is DISABLED on $Hostname" -Body $body
+            if (Send-Alert -Recipients $alertsTo `
+                    -Subject "[ServiceMonitor] ERROR: $svcName is DISABLED on $Hostname" -Body $body) {
+                Set-AlertSent -Key "$svcName|disabled"
+            }
         }
         $failureCount++
         continue
@@ -668,12 +922,25 @@ foreach ($entry in $activeEntries) {
 
     Write-Log -Level WARNING -Message "Service '$svcName' is NOT running (status: $currentStatus, startup: $startupType)"
     if ($alertsTo.Count -gt 0) {
-        $warnBody = New-AlertBody -ServiceName $svcName -Status "DOWN ($currentStatus)" `
-                                    -Attempt 0 -ErrorDetail '' -AlertGroup $entry.Alerts
-        Send-Alert -Recipients $alertsTo `
-                   -Subject "[ServiceMonitor] WARNING: $svcName is down on $Hostname" -Body $warnBody
+        if (Test-AlertDue -Key "$svcName|down") {
+            $warnBody = New-AlertBody -ServiceName $svcName -Status "DOWN ($currentStatus)" `
+                                        -Attempt 0 -ErrorDetail '' -AlertGroup $entry.Alerts
+            if (Send-Alert -Recipients $alertsTo `
+                    -Subject "[ServiceMonitor] WARNING: $svcName is down on $Hostname" -Body $warnBody) {
+                Set-AlertSent -Key "$svcName|down"
+            }
+        }
     } else {
-        Write-Log -Level INFO -Message "Alerts suppressed for '$svcName' (alerts=none)."
+        # Distinguish 'alerts=none' (deliberate) from a group with no recipients
+        # configured (probably a mistake) - the old message conflated the two.
+        Write-Log -Level INFO -Message "No alert email for '$svcName' (alerts=$($entry.Alerts), resolved recipients: $($alertsTo.Count))."
+    }
+
+    # Past the run budget: alert-only mode for the rest of this run.
+    if ((Get-Date) -gt $runDeadline) {
+        Write-Log -Level WARNING -Message "Run time budget ($RunBudgetMinutes min) exceeded - skipping restart attempts for '$svcName' until next run."
+        $failureCount++
+        continue
     }
 
     $restarted = $false
@@ -693,10 +960,12 @@ foreach ($entry in $activeEntries) {
             Write-Log -Level INFO -Message "Service '$svcName' recovered on attempt $attempt."
             Write-AppEvent -EntryType Information -EventId 1001 `
                 -Message "Service '$svcName' recovered on attempt $attempt/$MaxAttempts on $Hostname."
+            Clear-AlertState -ServiceName $svcName
             if ($alertsTo.Count -gt 0) {
+                # RECOVERED always sends - it closes the loop the DOWN alert opened.
                 $body = New-AlertBody -ServiceName $svcName -Status 'RECOVERED' `
                                         -Attempt $attempt -ErrorDetail '' -AlertGroup $entry.Alerts
-                Send-Alert -Recipients $alertsTo `
+                $null = Send-Alert -Recipients $alertsTo `
                            -Subject "[ServiceMonitor] RECOVERED: $svcName on $Hostname (attempt $attempt/$MaxAttempts)" `
                            -Body $body
             }
@@ -712,12 +981,14 @@ foreach ($entry in $activeEntries) {
     if (-not $restarted) {
         $errMsg = "Service '$svcName' failed to restart after $MaxAttempts attempts. Last error: $lastError"
         Write-Log -Level ERROR -Message $errMsg
-        if ($alertsTo.Count -gt 0) {
+        if ($alertsTo.Count -gt 0 -and (Test-AlertDue -Key "$svcName|failed")) {
             $body = New-AlertBody -ServiceName $svcName `
                                     -Status "RESTART FAILED after $MaxAttempts attempts" `
                                     -Attempt $MaxAttempts -ErrorDetail $lastError -AlertGroup $entry.Alerts
-            Send-Alert -Recipients $alertsTo `
-                       -Subject "[ServiceMonitor] ERROR: $svcName restart FAILED on $Hostname" -Body $body
+            if (Send-Alert -Recipients $alertsTo `
+                    -Subject "[ServiceMonitor] ERROR: $svcName restart FAILED on $Hostname" -Body $body) {
+                Set-AlertSent -Key "$svcName|failed"
+            }
         }
         $failureCount++
     }
@@ -725,4 +996,7 @@ foreach ($entry in $activeEntries) {
 
 Write-Log -Level INFO -Message "=== Check complete. Failures: $failureCount / $($activeEntries.Count) active services ==="
 
-exit $(if ($failureCount -gt 0) { 1 } else { 0 })
+# Exit 2 (not 1) for service failures: LastTaskResult must distinguish 'the
+# script crashed' (1) from 'the script worked but a service is broken' (2).
+if ($failureCount -gt 0) { exit 2 }
+exit 0

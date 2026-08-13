@@ -1,4 +1,5 @@
 ﻿#Requires -Version 5.1
+#Requires -RunAsAdministrator
 
 <#
 .SYNOPSIS
@@ -46,21 +47,31 @@
     Encryption uses ConvertFrom-SecureString with an explicit 256-bit key (cross-platform;
     does NOT use DPAPI, so the credential files are portable between machines that
     share the same .key file).
-    Version: 1.2.0
+    Requires elevation: the smtp.key ACL restriction (SYSTEM + Administrators)
+    and the usual C:\ServiceMonitor target folder both need admin rights.
+    Version: 1.3.0
 #>
 
 [CmdletBinding()]
 param(
-    [string] $OutputFolder = $PSScriptRoot,
+    [string] $OutputFolder = '',
     [string] $SmtpUser     = '',
     [string] $SmtpServer   = '',
-    [int]    $SmtpPort     = 25,
+    [int]    $SmtpPort     = 587,
     [string] $FromAddress  = '',
     [switch] $SmtpUseSsl,
     [switch] $Force
 )
 
 $ErrorActionPreference = 'Stop'
+
+# $PSScriptRoot is empty inside param() when launched via 'powershell.exe -File'
+# - resolve at body scope instead of defaulting the parameter.
+if (-not $OutputFolder) {
+    $OutputFolder = if     ($PSScriptRoot)  { $PSScriptRoot }
+                    elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath }
+                    else { throw 'Cannot resolve the script folder - pass -OutputFolder explicitly.' }
+}
 
 $keyFile  = Join-Path $OutputFolder 'smtp.key'
 $credFile = Join-Path $OutputFolder 'smtp.cred'
@@ -95,18 +106,51 @@ if (-not $SmtpUser) {
 # SMTP server differs per deployment, so capture it here and store it alongside
 # the credential (in smtp.json) rather than relying on a script default.
 if (-not $SmtpServer) {
-    $SmtpServer = Read-Host 'SMTP server (hostname or IP)'
+    $SmtpServer = Read-Host 'SMTP server (hostname or IP, WITHOUT port)'
 }
 if (-not $SmtpServer) {
     throw 'SMTP server cannot be empty.'
+}
+# host:port is a classic paste mistake - the whole string would be treated as a
+# hostname by SmtpClient and DNS resolution would fail. Port goes in SmtpPort.
+if ($SmtpServer -match ':') {
+    throw "SMTP server must be a hostname or IP only (got '$SmtpServer'). Set the port separately - it is prompted next / use -SmtpPort."
+}
+
+# Port, SSL and From were previously silent defaults (25 / off / empty), which
+# cost a real deployment hours: mail either never connected or was accepted by
+# the relay and then dropped because the From domain was not authorized.
+# Prompt for all three unless given on the command line.
+if (-not $PSBoundParameters.ContainsKey('SmtpPort')) {
+    $portAnswer = Read-Host "SMTP port [$SmtpPort]"
+    if ($portAnswer) {
+        # Validate before casting: '[int]' on junk throws an unfriendly parse
+        # error, and 0/70000 would be written to smtp.json unchallenged.
+        if ($portAnswer -notmatch '^\d+$' -or [int]$portAnswer -lt 1 -or [int]$portAnswer -gt 65535) {
+            throw "Invalid SMTP port '$portAnswer' - must be a number 1-65535 (587 for STARTTLS relay, 25 for anonymous)."
+        }
+        $SmtpPort = [int]$portAnswer
+    }
+}
+if (-not $PSBoundParameters.ContainsKey('SmtpUseSsl')) {
+    $sslAnswer = Read-Host 'Use SSL/STARTTLS? (required on port 587) [Y/n]'
+    $SmtpUseSsl = [switch]($sslAnswer -notmatch '^[Nn]')
+}
+if (-not $FromAddress) {
+    $FromAddress = Read-Host 'From address (MUST be on a domain the relay accepts mail for)'
+}
+if (-not $FromAddress) {
+    throw 'From address cannot be empty - the relay silently drops mail from unauthorized senders.'
 }
 
 $secPwd    = Read-Host 'SMTP password' -AsSecureString
 $secPwdCfm = Read-Host 'Confirm password' -AsSecureString
 
 # Compare passwords. Convert to plaintext only for the comparison, and always
-# free the unmanaged BSTR buffers (ZeroFreeBSTR zeroes them first) so the
-# plaintext password is not left lingering in process memory.
+# free the unmanaged BSTR buffers (ZeroFreeBSTR zeroes them first). Honest
+# caveat: PtrToStringBSTR still copies the password into managed strings that
+# live until garbage-collected - full scrubbing is not possible in .NET; this
+# just minimizes the exposure window.
 $bstr1 = [IntPtr]::Zero
 $bstr2 = [IntPtr]::Zero
 try {
@@ -161,7 +205,7 @@ Write-Host "  Json : $jsonFile  (server $SmtpServer`:$SmtpPort, ssl: $([bool]$Sm
 
 # Restrict ACL on key file: SYSTEM + Administrators only
 try {
-    $acl = Get-Acl -Path $keyFile
+    $acl = Get-Acl -LiteralPath $keyFile
     $acl.SetAccessRuleProtection($true, $false)    # break inheritance, discard inherited rules
 
     foreach ($rule in @($acl.Access)) {
@@ -176,7 +220,7 @@ try {
     $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
         $admins, 'FullControl', 'None', 'None', 'Allow')))
 
-    Set-Acl -Path $keyFile -AclObject $acl
+    Set-Acl -LiteralPath $keyFile -AclObject $acl
     Write-Host ''
     Write-Host "ACL restricted on smtp.key (SYSTEM + Administrators only)." -ForegroundColor Green
 } catch {

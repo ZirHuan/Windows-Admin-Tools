@@ -10,12 +10,15 @@ matters on multi-user RDP hosts where any logged-in user can reach 127.0.0.1.
 If SM_TOKEN is unset (default) the UI is open and RDP login is the only gate.
 """
 
+import ctypes
 import hmac
 import json
 import os
 import shutil
+import socket
 import subprocess
 import threading
+from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -101,8 +104,120 @@ def recent_changes(n: int = 20) -> list[str]:
     return lines[-n:][::-1]
 
 
+# ---------------------------------------------------------------------------
+# Resolve the interactive Windows user behind a localhost web request.
+#
+# The web service runs as LocalSystem, so it cannot read the RDP user's name
+# from the environment (that yields the service account). Instead we map the
+# request's client TCP port back to the owning process (the browser), then that
+# process's session -> username:
+#     GetExtendedTcpTable  (client port  -> owning PID)
+#     ProcessIdToSessionId (PID          -> session id)
+#     WTSQuerySessionInformationW (session id -> DOMAIN\user)
+# This is correct even on a multi-user RDP host where every session hits the
+# same 127.0.0.1. Best-effort only: any failure returns "" and the UI falls
+# back to the manual "Your name" field.
+# ---------------------------------------------------------------------------
+
+_AF_INET                 = 2
+_TCP_TABLE_OWNER_PID_ALL = 5
+_WTS_CURRENT_SERVER      = 0
+_WTS_USER_NAME           = 5
+_WTS_DOMAIN_NAME         = 7
+
+
+class _MIB_TCPROW_OWNER_PID(ctypes.Structure):
+    _fields_ = [
+        ("dwState",      wintypes.DWORD),
+        ("dwLocalAddr",  wintypes.DWORD),
+        ("dwLocalPort",  wintypes.DWORD),
+        ("dwRemoteAddr", wintypes.DWORD),
+        ("dwRemotePort", wintypes.DWORD),
+        ("dwOwningPid",  wintypes.DWORD),
+    ]
+
+
+def _pid_for_loopback_conn(local_port: int, remote_port: int) -> Optional[int]:
+    """PID owning the IPv4 loopback TCP connection with these local+remote ports."""
+    iphlpapi = ctypes.windll.iphlpapi
+    fn = iphlpapi.GetExtendedTcpTable
+    fn.restype = wintypes.DWORD
+    fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD), wintypes.BOOL,
+                   wintypes.ULONG, ctypes.c_int, wintypes.ULONG]
+
+    size = wintypes.DWORD(0)
+    # First call (NULL buffer) reports the required size.
+    fn(None, ctypes.byref(size), False, _AF_INET, _TCP_TABLE_OWNER_PID_ALL, 0)
+    buf = ctypes.create_string_buffer(size.value)
+    if fn(ctypes.cast(buf, ctypes.c_void_p), ctypes.byref(size), False,
+          _AF_INET, _TCP_TABLE_OWNER_PID_ALL, 0) != 0:
+        return None
+
+    num = ctypes.cast(buf, ctypes.POINTER(wintypes.DWORD))[0]
+    # The row array follows the leading DWORD count (4-byte aligned; all-DWORD rows).
+    rows = ctypes.cast(ctypes.addressof(buf) + 4,
+                       ctypes.POINTER(_MIB_TCPROW_OWNER_PID * num))[0]
+    for i in range(num):
+        row = rows[i]
+        lp = socket.ntohs(row.dwLocalPort & 0xFFFF)
+        rp = socket.ntohs(row.dwRemotePort & 0xFFFF)
+        if lp == local_port and rp == remote_port:
+            return int(row.dwOwningPid)
+    return None
+
+
+def _wts_session_string(session_id: int, info_class: int) -> str:
+    wtsapi = ctypes.windll.wtsapi32
+    query = wtsapi.WTSQuerySessionInformationW
+    query.restype = wintypes.BOOL
+    query.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_int,
+                      ctypes.POINTER(wintypes.LPWSTR), ctypes.POINTER(wintypes.DWORD)]
+    ptr = wintypes.LPWSTR()
+    nbytes = wintypes.DWORD(0)
+    if not query(_WTS_CURRENT_SERVER, session_id, info_class,
+                 ctypes.byref(ptr), ctypes.byref(nbytes)):
+        return ""
+    try:
+        return ptr.value or ""
+    finally:
+        wtsapi.WTSFreeMemory(ptr)
+
+
+def resolve_request_user(request: Request) -> str:
+    """Best-effort DOMAIN\\user of the interactive session behind this request."""
+    if os.name != "nt":
+        return ""
+    try:
+        client = request.client
+        server = request.scope.get("server")
+        if not client or not server:
+            return ""
+        # uvicorn binds IPv4 127.0.0.1; only that maps via the IPv4 TCP table.
+        if client.host != "127.0.0.1":
+            return ""
+        pid = _pid_for_loopback_conn(int(client.port), int(server[1]))
+        if not pid:
+            return ""
+        sid = wintypes.DWORD()
+        pid2sid = ctypes.windll.kernel32.ProcessIdToSessionId
+        pid2sid.restype = wintypes.BOOL
+        pid2sid.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+        if not pid2sid(pid, ctypes.byref(sid)):
+            return ""
+        user = _wts_session_string(sid.value, _WTS_USER_NAME)
+        if not user:
+            return ""
+        domain = _wts_session_string(sid.value, _WTS_DOMAIN_NAME)
+        return f"{domain}\\{user}" if domain else user
+    except Exception:
+        return ""
+
+
 def get_user(request: Request) -> str:
-    return request.cookies.get("sm_user", "")
+    # An explicit name (typed into the "Your name" field) always wins; otherwise
+    # default to the resolved interactive RDP user so the audit log is attributed
+    # automatically instead of falling back to "unknown".
+    return request.cookies.get("sm_user", "") or resolve_request_user(request)
 
 
 # ---------------------------------------------------------------------------
