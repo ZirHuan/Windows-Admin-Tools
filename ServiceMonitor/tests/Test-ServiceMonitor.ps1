@@ -17,24 +17,33 @@
         Invoke-Pester .\Test-ServiceMonitor.ps1 -Output Detailed -Tag Quick
 
 .NOTES
-    Version: 1.1.0
+    Version: 1.2.0
     Requires: Pester 5.0+, Windows PowerShell 5.1 or PowerShell 7+, Run as Admin
               (needed so ServiceMonitor.ps1 can call Get-Service without errors)
 #>
 
 BeforeAll {
-    $script:ScriptPath = Join-Path $PSScriptRoot '..\ServiceMonitor.ps1'
-    if (-not (Test-Path -LiteralPath $script:ScriptPath)) {
-        throw "ServiceMonitor.ps1 not found at: $script:ScriptPath"
+    $script:SourceScript = Join-Path $PSScriptRoot '..\ServiceMonitor.ps1'
+    if (-not (Test-Path -LiteralPath $script:SourceScript)) {
+        throw "ServiceMonitor.ps1 not found at: $script:SourceScript"
     }
 
     # Working directory for all test artefacts
     $script:TestRoot = Join-Path $env:TEMP "SMTest_$(Get-Random)"
     New-Item -ItemType Directory -Path $script:TestRoot | Out-Null
 
+    # Run a COPY of the script from an otherwise-empty directory. Several paths
+    # are resolved against the script's own folder ($ScriptDir): monitor-config.json,
+    # ServiceMonitor.state.json and smtp.json. Running the repo copy in place would
+    # (a) load the repo's real monitor-config.json instead of the legacy flat files
+    # these tests exercise, and (b) write state/log artefacts into the working tree.
+    # An empty folder gives legacy flat-file mode via the documented default path -
+    # passing a nonexistent -ConfigFile is a FATAL error by design (see the
+    # 'Explicit missing config file' block below), so it cannot be used here.
+    $script:ScriptPath = Join-Path $script:TestRoot 'ServiceMonitor.ps1'
+    Copy-Item -LiteralPath $script:SourceScript -Destination $script:ScriptPath -Force
+
     $script:Recipients  = Join-Path $script:TestRoot 'test-recipients.txt'
-    # Points to a JSON file that must NOT exist - forces legacy flat-file mode in all tests
-    $script:NoJsonConfig = Join-Path $script:TestRoot 'no-monitor-config.json'
     # Needs at least one real recipient so the alert path (and its [NoEmail]
     # suppression logging) is actually exercised; -NoEmail means nothing is sent.
     @('# test recipients', 'test-noreply@example.com') |
@@ -42,8 +51,9 @@ BeforeAll {
 
     function Invoke-SM {
         # Helper: run ServiceMonitor.ps1 with -NoEmail and a fresh log, return log content.
-        # -ConfigFile is set to a non-existent path to force legacy flat-file mode;
-        # otherwise the script would pick up monitor-config.json from its own folder.
+        # -ConfigFile is deliberately NOT passed: the script copy lives in an empty
+        # directory, so the default monitor-config.json is absent and legacy
+        # flat-file mode is selected.
         param(
             [string]   $ServicesContent,
             [string[]] $ExtraArgs = @()
@@ -51,11 +61,9 @@ BeforeAll {
         $id         = [System.IO.Path]::GetRandomFileName()
         $svcFile    = Join-Path $script:TestRoot "svc_$id.txt"
         $logFile    = Join-Path $script:TestRoot "log_$id.log"
-        $noJsonPath = Join-Path $script:TestRoot "no-config-$id.json"   # must not exist
         [System.IO.File]::WriteAllText($svcFile, $ServicesContent)
 
         & $script:ScriptPath `
-            -ConfigFile     $noJsonPath `
             -ServicesFile   $svcFile `
             -RecipientsFile $script:Recipients `
             -LogFile        $logFile `
@@ -106,7 +114,6 @@ Describe 'Running service' -Tag Quick {
         'Spooler' | Set-Content -Path $svcFile -Encoding UTF8
 
         & $script:ScriptPath `
-            -ConfigFile      $script:NoJsonConfig `
             -ServicesFile    $svcFile `
             -RecipientsFile  $script:Recipients `
             -LogFile         $logFile `
@@ -173,7 +180,6 @@ Describe 'Nonexistent service' -Tag Quick {
         'NonExistentService_XYZ_12345' | Set-Content -Path $svcFile -Encoding UTF8
 
         & $script:ScriptPath `
-            -ConfigFile      $script:NoJsonConfig `
             -ServicesFile    $svcFile `
             -RecipientsFile  $script:Recipients `
             -LogFile         $logFile `
@@ -212,7 +218,6 @@ Describe 'Empty services file' -Tag Quick {
         '# only comments here' | Set-Content -Path $svcFile -Encoding UTF8
 
         & $script:ScriptPath `
-            -ConfigFile      $script:NoJsonConfig `
             -ServicesFile    $svcFile `
             -RecipientsFile  $script:Recipients `
             -LogFile         $logFile `
@@ -229,14 +234,16 @@ Describe 'Empty services file' -Tag Quick {
         $logFile = Join-Path $script:TestRoot "log_$id.log"
 
         & $script:ScriptPath `
-            -ConfigFile      $script:NoJsonConfig `
             -ServicesFile    $svcFile `
             -RecipientsFile  $script:Recipients `
             -LogFile         $logFile `
             -NoEmail 2>&1 | Out-Null
 
         $log = [System.IO.File]::ReadAllText($logFile)
-        $log | Should -Match 'not found'
+        # Must be the Services-file error specifically; a bare 'not found' would
+        # also match the benign 'monitor-config.json not found' fallback warning
+        # that legacy mode always logs (cf. b2c47d9).
+        $log | Should -Match 'Services file not found'
     }
 }
 
@@ -252,7 +259,6 @@ Describe 'Log rotation' {
         'existing log content' | Set-Content -Path $logFile -Encoding UTF8
 
         & $script:ScriptPath `
-            -ConfigFile      $script:NoJsonConfig `
             -ServicesFile    $svcFile `
             -RecipientsFile  $script:Recipients `
             -LogFile         $logFile `
@@ -274,7 +280,6 @@ Describe 'Log rotation' {
         'run 3' | Set-Content "$logFile"   -Encoding UTF8
 
         & $script:ScriptPath `
-            -ConfigFile      $script:NoJsonConfig `
             -ServicesFile    $svcFile `
             -RecipientsFile  $script:Recipients `
             -LogFile         $logFile `
@@ -295,7 +300,6 @@ Describe '-TestEmail mode' -Tag Quick {
         $logFile = Join-Path $script:TestRoot "log_testemail_$id.log"
 
         & $script:ScriptPath `
-            -ConfigFile      $script:NoJsonConfig `
             -RecipientsFile  $script:Recipients `
             -LogFile         $logFile `
             -NoEmail `
@@ -319,7 +323,6 @@ Describe 'SMTP credential files' -Tag Quick {
         [System.IO.File]::WriteAllBytes($fakeKey, (New-Object byte[] 32))
 
         & $script:ScriptPath `
-            -ConfigFile      $script:NoJsonConfig `
             -ServicesFile    (Join-Path $PSScriptRoot 'test-services.txt') `
             -RecipientsFile  $script:Recipients `
             -LogFile         $logFile `
@@ -337,7 +340,6 @@ Describe 'SMTP credential files' -Tag Quick {
         [System.IO.File]::WriteAllBytes($fakeKey, (New-Object byte[] 32))
 
         & $script:ScriptPath `
-            -ConfigFile      $script:NoJsonConfig `
             -ServicesFile    (Join-Path $PSScriptRoot 'test-services.txt') `
             -RecipientsFile  $script:Recipients `
             -LogFile         $logFile `
@@ -361,5 +363,33 @@ Describe 'Summary line' -Tag Quick {
     It 'Logs 0 failures when all services are healthy' {
         $log = Invoke-SM -ServicesContent 'Spooler'
         $log | Should -Match 'Failures: 0 / 1'
+    }
+}
+
+# ---------------------------------------------------------------------------
+Describe 'Explicit missing config file' -Tag Quick {
+    # v1.3.0 hardening: an explicitly passed -ConfigFile that does not exist is an
+    # operator error (typo in the scheduled-task action). Silently falling back to
+    # a possibly-stale services.txt would monitor the wrong set forever, so the
+    # script must fail loudly instead.
+    It 'Fails fatally instead of falling back to legacy flat files' {
+        $id      = [System.IO.Path]::GetRandomFileName()
+        $svcFile = Join-Path $script:TestRoot "svc_$id.txt"
+        $logFile = Join-Path $script:TestRoot "log_$id.log"
+        $missing = Join-Path $script:TestRoot "absent-config-$id.json"   # must not exist
+        'Spooler' | Set-Content -Path $svcFile -Encoding UTF8
+
+        & $script:ScriptPath `
+            -ConfigFile      $missing `
+            -ServicesFile    $svcFile `
+            -RecipientsFile  $script:Recipients `
+            -LogFile         $logFile `
+            -NoEmail 2>&1 | Out-Null
+
+        $LASTEXITCODE | Should -Be 1
+        $log = [System.IO.File]::ReadAllText($logFile)
+        $log | Should -Match 'Config file explicitly specified but not found'
+        # Must NOT have silently used the legacy services file
+        $log | Should -Not -Match "OK: 'Spooler'"
     }
 }

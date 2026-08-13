@@ -5,6 +5,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning follo
 
 ## [Unreleased]
 
+### Fixed
+- **`tests/Test-ServiceMonitor.ps1`: repaired the suite against the v1.3.0 config
+  hardening (16 of 23 tests were failing on both PS 5.1 and PS 7).** The suite forced
+  legacy flat-file mode by passing `-ConfigFile` at a path that deliberately did not
+  exist - which v1.3.0 turned into a deliberate fatal error, so every affected test
+  died at startup and its assertions matched the crash log instead of real output.
+  Tests now run a **copy** of `ServiceMonitor.ps1` from an empty temp directory and
+  omit `-ConfigFile` entirely, reaching legacy mode via the documented default path.
+  This also stops the suite writing `ServiceMonitor.state.json` / log artefacts into
+  the working tree, since those resolve against the script's own folder.
+  The script itself is unchanged - the hardening was correct, the test technique was not.
+
+### Added
+- **`tests/Test-ServiceMonitor.ps1`: coverage for the explicit-missing-config fatal.**
+  The v1.3.0 hardening shipped with no test of its own, which is why breaking the
+  suite with it went unnoticed until CI. Now asserts exit 1, the specific error
+  message, and that no legacy fallback occurred.
+
+### Changed
+- **`tests/Test-ServiceMonitor.ps1`: tightened the services-file-not-found assertion**
+  from `not found` to `Services file not found`. The loose form also matched the
+  benign `monitor-config.json not found` fallback warning that legacy mode always
+  logs, so the test passed for the wrong reason (same defect class as b2c47d9).
+
 ## [1.3.0] - 2026-07-02
 
 Hardening release driven by a three-way critical review (Claude, powershell-script-tester
