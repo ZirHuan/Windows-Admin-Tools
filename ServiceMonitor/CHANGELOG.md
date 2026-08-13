@@ -23,6 +23,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning follo
   suite with it went unnoticed until CI. Now asserts exit 1, the specific error
   message, and that no legacy fallback occurred.
 
+- **`tests/Test-ServiceMonitor.ps1`: caught the suite up to three deliberate v1.3.0
+  behaviour changes it had never tracked.** These were masked by the config-hardening
+  break above - with every affected test crashing at startup, they only surfaced once
+  the suite ran again. In all three the script was right and the test was stale:
+  - Startup banner asserted `ServiceMonitor v1.2.5`. The literal had rotted across
+    the whole v1.2.6 - v1.3.0 range; the expected version is now parsed from
+    `$ScriptVersion` in the script, so it cannot rot again.
+  - "Service not found" expected exit `1`. v1.3.0 split the codes - `1` is now
+    reserved for a fatal script error and `2` means the run completed with at least
+    one service failure - so the correct expectation is `2`.
+  - "Services file has only comments" expected an error and exit `1`. v1.3.0
+    deliberately downgraded this to a WARNING and exit `0`, because a fresh install
+    has no services until the operator adds them and exiting 1 spammed an Error
+    event every 5 minutes. Now asserts the warning text and exit `0`.
+
 ### Changed
 - **`tests/Test-ServiceMonitor.ps1`: tightened the services-file-not-found assertion**
   from `not found` to `Services file not found`. The loose form also matched the

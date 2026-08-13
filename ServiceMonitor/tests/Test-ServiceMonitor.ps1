@@ -43,6 +43,15 @@ BeforeAll {
     $script:ScriptPath = Join-Path $script:TestRoot 'ServiceMonitor.ps1'
     Copy-Item -LiteralPath $script:SourceScript -Destination $script:ScriptPath -Force
 
+    # Single source of truth for the version assertion in the startup-banner test.
+    $versionMatch = [regex]::Match(
+        [System.IO.File]::ReadAllText($script:SourceScript),
+        "(?m)^\s*\`$ScriptVersion\s*=\s*'([^']+)'")
+    if (-not $versionMatch.Success) {
+        throw 'Could not parse $ScriptVersion from ServiceMonitor.ps1'
+    }
+    $script:ScriptVersion = $versionMatch.Groups[1].Value
+
     $script:Recipients  = Join-Path $script:TestRoot 'test-recipients.txt'
     # Needs at least one real recipient so the alert path (and its [NoEmail]
     # suppression logging) is actually exercised; -NoEmail means nothing is sent.
@@ -84,8 +93,11 @@ AfterAll {
 # ---------------------------------------------------------------------------
 Describe 'Startup banner' -Tag Quick {
     It 'Logs version and hostname in startup banner' {
+        # The expected version is read from the script rather than hardcoded: a
+        # literal here silently rotted from v1.2.5 through the v1.3.0 release and
+        # only surfaced once an unrelated CI break was fixed.
         $log = Invoke-SM -ServicesContent 'Spooler'
-        $log | Should -Match 'ServiceMonitor v1\.2\.5'
+        $log | Should -Match ('ServiceMonitor v' + [regex]::Escape($script:ScriptVersion))
         $log | Should -Match $env:COMPUTERNAME
     }
 }
@@ -173,7 +185,7 @@ Describe 'Nonexistent service' -Tag Quick {
         $log | Should -Match '\[NoEmail\]'
     }
 
-    It 'Exits with 1 when a service is not found (permanent failure)' {
+    It 'Exits with 2 when a service is not found (permanent failure)' {
         $id      = [System.IO.Path]::GetRandomFileName()
         $svcFile = Join-Path $script:TestRoot "svc_$id.txt"
         $logFile = Join-Path $script:TestRoot "log_$id.log"
@@ -185,7 +197,10 @@ Describe 'Nonexistent service' -Tag Quick {
             -LogFile         $logFile `
             -NoEmail 2>&1 | Out-Null
 
-        $LASTEXITCODE | Should -Be 1
+        # v1.3.0 split the exit codes: 1 is now reserved for a FATAL script error
+        # (bad config, unwritable log), while 2 means the run completed and at
+        # least one service failed. A missing service is the latter.
+        $LASTEXITCODE | Should -Be 2
     }
 }
 
@@ -211,7 +226,10 @@ Describe 'Service name injection prevention' -Tag Quick {
 
 # ---------------------------------------------------------------------------
 Describe 'Empty services file' -Tag Quick {
-    It 'Logs error and exits 1 when services file has only comments' {
+    # v1.3.0 deliberately downgraded "nothing to check" from an error to a benign
+    # outcome: a fresh install has zero services until the operator adds them in
+    # the web UI, and exiting 1 spammed an Error event every 5 minutes.
+    It 'Warns and exits 0 when services file has only comments' {
         $id      = [System.IO.Path]::GetRandomFileName()
         $svcFile = Join-Path $script:TestRoot "svc_$id.txt"
         $logFile = Join-Path $script:TestRoot "log_$id.log"
@@ -224,8 +242,9 @@ Describe 'Empty services file' -Tag Quick {
             -NoEmail 2>&1 | Out-Null
 
         $log = [System.IO.File]::ReadAllText($logFile)
-        $log | Should -Match 'No active services to check'
-        $LASTEXITCODE | Should -Be 1
+        $log | Should -Match 'No services configured yet'
+        $log | Should -Match '\[WARNING\]'
+        $LASTEXITCODE | Should -Be 0
     }
 
     It 'Logs error when services file does not exist' {
