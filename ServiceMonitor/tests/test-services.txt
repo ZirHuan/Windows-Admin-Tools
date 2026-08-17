@@ -1,0 +1,6 @@
+# ServiceMonitor test service list
+# Used by Test-ServiceMonitor.ps1 for SMTP credential tests
+# These services exist on any standard Windows installation.
+
+Spooler
+W32Time

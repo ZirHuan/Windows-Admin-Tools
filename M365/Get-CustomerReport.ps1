@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+﻿#Requires -Version 7.0
 
 <#
 .SYNOPSIS
@@ -32,7 +32,7 @@
     .\Get-CustomerReport.ps1 -TenantId "contoso.com" -AdminUPN "admin@contoso.com" -TenantName "Contoso"
 .NOTES
     Authors:  Rosvall & Claude
-    Version:  1.5.3
+    Version:  1.5.4
     Changelog:
         1.0.0 - Initial release
         1.1.0 - Fix IsExternal to check all verified tenant domains (not only primary)
@@ -88,6 +88,10 @@
                 Markdown: GitHub-flavored .md with all major sections (findings, licenses, users, score, CA)
                 JsonOnly: saves raw source JSON files only — no report file generated
         1.5.3 - Add -PrintFriendly switch: white/light CSS theme optimised for printing and PDF export
+        1.5.4 - Fix: file is now saved as UTF-8 WITH BOM. Without the BOM, Windows PowerShell
+                5.1 decoded the 1200 non-ASCII characters (box-drawing, em-dashes) using the
+                legacy ANSI codepage, which desynchronised the tokenizer and produced 56 parse
+                errors - the script could not run at all on 5.1. No functional change.
                 Pure white background, solid borders, high-contrast text, search/nav hidden at print time
                 @media print: color-adjust:exact so backgrounds/badges print correctly; page-break-inside:avoid on cards/findings
                 Compatible with -OutputFormat PDF for clean black-and-white or colour printouts

@@ -477,16 +477,18 @@ try {
         # ---------------------------------------------------------------
         # Re-enabling sign-in alone is not sufficient for the user to log in.
         # A password reset is required separately — the previous password is
-        # not retained after offboarding. Use the Entra ID portal or:
-        #   Reset-MgUserPassword -UserId $UserPrincipalName
-        #   (requires Authentication.ReadWrite.All scope — not included here
-        #    intentionally to keep this script scoped to offboard/restore only)
+        # not retained after offboarding. Use the Entra ID portal, or set a new
+        # password with:
+        #   Update-MgUser -UserId $UserPrincipalName -PasswordProfile @{
+        #       ForceChangePasswordNextSignIn = $true; Password = '<temp-password>' }
+        #   (requires User.ReadWrite.All + a privileged admin role; intentionally
+        #    not done here to keep this script scoped to offboard/restore only.)
 
         if ($PSCmdlet.ShouldProcess($UserPrincipalName, "Re-enable Entra ID sign-in (AccountEnabled = true)")) {
             Write-Log "Step 3: Re-enabling sign-in for $UserPrincipalName"
             Update-MgUser -UserId $UserPrincipalName -AccountEnabled $true -ErrorAction Stop
             Write-Log "Sign-in re-enabled." -Level 'SUCCESS'
-            Write-Log "REMINDER: A password reset is required before the user can sign in. Run Reset-MgUserPassword or reset via Entra ID portal." -Level 'WARN'
+            Write-Log "REMINDER: A password reset is required before the user can sign in. Use 'Update-MgUser -PasswordProfile' or reset via the Entra ID portal." -Level 'WARN'
         }
 
         Write-Log "--- REVERSAL sequence complete ---" -Level 'SUCCESS'

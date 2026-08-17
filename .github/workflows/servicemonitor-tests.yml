@@ -1,0 +1,78 @@
+name: ServiceMonitor Pester Tests
+
+# Runs the ServiceMonitor Pester v5 suite on a real Windows runner, across BOTH
+# Windows PowerShell 5.1 and PowerShell 7 -- the matrix that cannot be reproduced
+# on the Linux dev host. Scoped to ServiceMonitor/** so unrelated tool changes don't fire.
+
+on:
+  push:
+    paths:
+      - 'ServiceMonitor/**'
+      - '.github/workflows/servicemonitor-tests.yml'
+  pull_request:
+    paths:
+      - 'ServiceMonitor/**'
+      - '.github/workflows/servicemonitor-tests.yml'
+  workflow_dispatch: {}   # allow manual runs from the Actions tab
+
+# Cancel superseded runs on the same ref to limit duplicate push+PR billing.
+concurrency:
+  group: servicemonitor-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pester:
+    name: Pester (${{ matrix.shell }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shell: powershell   # Windows PowerShell 5.1 (built in)
+            label: ps5.1
+          - shell: pwsh         # PowerShell 7.x (pre-installed)
+            label: ps7
+
+    # 'shell:' is not allowed to read the matrix context per step, but
+    # defaults.run.shell is -- so set it once here for all run steps.
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show PowerShell version
+        run: $PSVersionTable | Format-List
+
+      - name: Install Pester 5
+        run: |
+          # Win PS 5.1 ships Pester 3.4 built-in; force the gallery 5.x alongside it.
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Install-Module -Name Pester -MinimumVersion 5.5.0 -Force -SkipPublisherCheck -Scope CurrentUser
+          Import-Module Pester -MinimumVersion 5.5.0
+          Get-Module Pester | Select-Object Name, Version
+
+      - name: Run Pester
+        run: |
+          Import-Module Pester -MinimumVersion 5.5.0
+          $config = New-PesterConfiguration
+          $config.Run.Path        = 'ServiceMonitor/tests/Test-ServiceMonitor.ps1'
+          $config.Run.Exit        = $true            # non-zero exit on any failure
+          $config.Output.Verbosity = 'Detailed'
+          $config.TestResult.Enabled      = $true
+          $config.TestResult.OutputFormat = 'NUnitXml'
+          $config.TestResult.OutputPath   = "testresults-${{ matrix.label }}.xml"
+          Invoke-Pester -Configuration $config
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pester-results-${{ matrix.label }}
+          path: testresults-${{ matrix.label }}.xml
+          if-no-files-found: warn

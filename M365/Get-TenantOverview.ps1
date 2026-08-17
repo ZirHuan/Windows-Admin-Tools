@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+﻿#Requires -Version 7.0
 
 <#
 .SYNOPSIS
@@ -378,7 +378,6 @@ $exoContent = if ($exoError) {
 
 # Monitoring section content
 $techMailsHtml = if ($techNotificationMails) {
-    $techNotificationMails | ForEach-Object { "<li>$_</li>" } | Out-String
     "<ul style='padding-left:20px;line-height:2'>$($techNotificationMails | ForEach-Object { "<li>$_</li>" })</ul>"
 } else {
     "<p class='empty'>No technical notification emails configured.</p>"
