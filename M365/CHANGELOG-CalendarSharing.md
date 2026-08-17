@@ -10,6 +10,22 @@ follows [Semantic Versioning](https://semver.org/).
 Git tags for this tool are prefixed `calendar-sharing-v*` (this repo holds
 multiple independent scripts).
 
+## [1.2.0] - 2026-06-22
+
+### Added
+- App-only authentication: new `-TenantId`, `-ClientId`, `-ClientSecret` parameters enable
+  client credentials flow (`Connect-MgGraph -ClientSecretCredential`). Required when the
+  connecting account has no mailbox/license (e.g. unlicensed admin-only accounts).
+
+### Changed
+- Calendar event operations now use `Invoke-MgGraphRequest` (raw Graph HTTP) instead of
+  `Get-MgUserEvent` / `Update-MgUserEvent`. Eliminates the `Microsoft.Graph.Calendar`
+  module dependency — only `Microsoft.Graph.Authentication` + `Microsoft.Graph.Users`
+  are now required.
+- Added "Found: N event(s) before cutoff" progress line per mailbox.
+
+---
+
 ## [1.0.0] - 2026-06-14
 
 First versioned release. Solves: "let everyone in the tenant see everyone's

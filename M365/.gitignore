@@ -14,3 +14,6 @@ LicensedUsers-*.html
 Thumbs.db
 
 tmp/
+
+# Customer report output directories (Get-CustomerReport.ps1 output)
+*.source/
