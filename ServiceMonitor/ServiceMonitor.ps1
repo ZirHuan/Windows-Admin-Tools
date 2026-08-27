@@ -786,6 +786,24 @@ if (Test-Path -LiteralPath $smtpCfgPath) {
     }
 }
 
+# Auto-discover the credential store beside smtp.json when NEITHER file was given
+# explicitly, mirroring the smtp.json auto-load above. Without this, credentials
+# stored from the web admin UI would be ignored by a scheduled task that was
+# registered without -SmtpCredFile/-SmtpKeyFile (the common case).
+# Explicit parameters still win. A half-specified pair is deliberately left alone
+# so the existing "both must be specified" warning still fires. A username is
+# required too: a cred store with no user would authenticate as an empty user.
+if (-not $SmtpCredFile -and -not $SmtpKeyFile -and $SmtpUser) {
+    $credDir      = [System.IO.Path]::GetDirectoryName($smtpCfgPath)
+    $autoCredFile = Join-Path $credDir 'smtp.cred'
+    $autoKeyFile  = Join-Path $credDir 'smtp.key'
+    if ((Test-Path -LiteralPath $autoCredFile) -and (Test-Path -LiteralPath $autoKeyFile)) {
+        $SmtpCredFile = $autoCredFile
+        $SmtpKeyFile  = $autoKeyFile
+        Write-Log -Level INFO -Message "Auto-discovered SMTP credential store in ${credDir} (smtp.cred + smtp.key)"
+    }
+}
+
 Initialize-SmtpCredential
 Import-MonitorConfig
 
