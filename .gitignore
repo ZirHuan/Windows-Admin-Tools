@@ -16,3 +16,5 @@ actionlint
 DomainScanner/*.config.json
 !DomainScanner/sample.config.json
 
+# Published design/runbook artifact bundles (generated; sources are *.dc.html + build.py)
+ServiceMonitor/design/servicemonitor-*.html
