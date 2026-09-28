@@ -6,7 +6,8 @@
 
 .DESCRIPTION
     PRIMARY MODE (v1.2+): Reads monitor-config.json produced by the web admin UI.
-    Each service entry carries an 'alerts' field: 'both' | 'dev' | 'iver' | 'none'.
+    Each service entry carries an 'alerts' field: 'both' | 'dev' | 'support' | 'none'.
+    (The pre-1.4.0 group key 'iver' is still accepted and treated as 'support'.)
     Alerts are routed to the matching mail group(s) configured in the JSON file.
 
     LEGACY FALLBACK: If -ConfigFile is omitted and the file does not exist, falls
@@ -41,16 +42,18 @@
     Default: 10
 
 .PARAMETER SmtpServer
-    SMTP relay hostname or IP.
-    Default: 192.168.2.15
+    SMTP relay hostname or IP. Normally supplied by smtp.json (New-CredStore.ps1 or
+    the web UI). No built-in default: with no server configured, alerts are logged
+    as failed rather than sent to a guessed relay.
 
 .PARAMETER SmtpPort
     SMTP relay port.
     Default: 25
 
 .PARAMETER FromAddress
-    Sender address used in alert emails.
-    Default: servicemonitor@rosvalls.com
+    Sender address used in alert emails. Normally supplied by smtp.json.
+    Default: servicemonitor@<this computer's DNS domain>. The relay must accept this
+    sender, so set it explicitly for any real deployment.
 
 .PARAMETER SmtpUser
     SMTP username for authenticated relay. Omit for anonymous relay.
@@ -135,9 +138,9 @@ param(
     [string] $RecipientsFile       = '',
     [string] $LogFile              = '',
     [int]    $LogMaxSizeMB         = 10,
-    [string] $SmtpServer           = '192.168.2.15',
+    [string] $SmtpServer           = '',
     [int]    $SmtpPort             = 25,
-    [string] $FromAddress          = 'servicemonitor@rosvalls.com',
+    [string] $FromAddress          = '',
     [string] $SmtpUser             = '',
     [string] $SmtpCredFile         = '',
     [string] $SmtpKeyFile          = '',
@@ -221,7 +224,7 @@ trap {
     exit 1
 }
 
-$ScriptVersion = '1.3.0'
+$ScriptVersion = '1.4.0'
 $Hostname      = $env:COMPUTERNAME
 
 $ServiceNamePattern = '^[A-Za-z0-9_.$ -]+$'
@@ -320,12 +323,12 @@ function Write-Log {
 class ServiceEntry {
     [string] $Name
     [bool]   $Paused
-    [string] $Alerts   # 'both' | 'dev' | 'iver' | 'none'
+    [string] $Alerts   # 'both' | 'dev' | 'support' | 'none'
 }
 
 # Represents loaded config
 $script:DevRecipients  = [string[]]@()
-$script:IverRecipients = [string[]]@()
+$script:SupportRecipients = [string[]]@()
 $script:AllRecipients  = [string[]]@()
 $script:ServiceEntries = [System.Collections.Generic.List[ServiceEntry]]::new()
 $script:UsingJsonConfig = $false
@@ -355,12 +358,15 @@ function Import-MonitorConfig {
 
             $groups    = Get-Prop $json   'groups'
             $devRcpts  = Get-Prop (Get-Prop $groups 'dev')  'recipients'
-            $iverRcpts = Get-Prop (Get-Prop $groups 'iver') 'recipients'
+            # 'support' was called 'iver' before 1.4.0 - read either key.
+            $supGroup  = Get-Prop $groups 'support'
+            if ($null -eq $supGroup) { $supGroup = Get-Prop $groups 'iver' }
+            $supRcpts  = Get-Prop $supGroup 'recipients'
             $services  = Get-Prop $json   'services'
 
             $script:DevRecipients  = @($devRcpts  | Where-Object { $_ -match '@' })
-            $script:IverRecipients = @($iverRcpts | Where-Object { $_ -match '@' })
-            $script:AllRecipients  = @($script:DevRecipients + $script:IverRecipients | Select-Object -Unique)
+            $script:SupportRecipients = @($supRcpts | Where-Object { $_ -match '@' })
+            $script:AllRecipients  = @($script:DevRecipients + $script:SupportRecipients | Select-Object -Unique)
 
             foreach ($s in $services) {
                 $name = Get-Prop $s 'name'
@@ -369,13 +375,14 @@ function Import-MonitorConfig {
                 $entry.Name    = $name
                 $entry.Paused  = [bool](Get-Prop $s 'paused')
                 $sAlerts       = Get-Prop $s 'alerts'
-                $entry.Alerts  = if ($sAlerts -in @('both','dev','iver','none')) { $sAlerts } else { 'both' }
+                if ($sAlerts -eq 'iver') { $sAlerts = 'support' }   # pre-1.4.0 key
+                $entry.Alerts  = if ($sAlerts -in @('both','dev','support','none')) { $sAlerts } else { 'both' }
                 $script:ServiceEntries.Add($entry)
             }
             $script:UsingJsonConfig = $true
 
-            Write-Log -Level INFO -Message ("JSON config: {0} services, dev={1} iver={2} recipients" -f `
-                $script:ServiceEntries.Count, $script:DevRecipients.Count, $script:IverRecipients.Count)
+            Write-Log -Level INFO -Message ("JSON config: {0} services, dev={1} support={2} recipients" -f `
+                $script:ServiceEntries.Count, $script:DevRecipients.Count, $script:SupportRecipients.Count)
         } catch {
             throw "Failed to parse $ConfigFile : $_"
         }
@@ -397,11 +404,11 @@ function Import-MonitorConfig {
             $script:ServiceEntries.Add($e)
         }
 
-        # Load recipients (all go to AllRecipients; dev/iver not used in legacy mode)
+        # Load recipients (all go to AllRecipients; dev/support not used in legacy mode)
         $rcptLines = @(Read-ListFile -Path $RecipientsFile -Label 'Recipients')
         $script:AllRecipients  = @($rcptLines | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '@' })
         $script:DevRecipients  = $script:AllRecipients
-        $script:IverRecipients = $script:AllRecipients
+        $script:SupportRecipients = $script:AllRecipients
     }
 }
 
@@ -409,7 +416,7 @@ function Get-AlertRecipients {
     param([string] $AlertsValue)
     switch ($AlertsValue) {
         'dev'   { return $script:DevRecipients  }
-        'iver'  { return $script:IverRecipients }
+        'support' { return $script:SupportRecipients }
         'none'  { return [string[]]@()          }
         default { return $script:AllRecipients  }  # 'both' + unknown values
     }
@@ -458,12 +465,16 @@ function Send-Alert {
         Write-Log -Level INFO -Message "[NoEmail] Would send: $Subject"
         return $true
     }
-    # Case-insensitive dedup: 'both' merges the dev+iver lists, and
+    # Case-insensitive dedup: 'both' merges the dev+support lists, and
     # User@x.com / user@x.com must not receive the alert twice.
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     $rcptArray = @($Recipients | Where-Object { $_ -match '@' -and $seen.Add($_) })
     if ($rcptArray.Count -eq 0) {
         Write-Log -Level WARNING -Message 'No recipients for this alert - skipping email.'
+        return $false
+    }
+    if (-not $SmtpServer) {
+        Write-Log -Level ERROR -Message 'No SMTP server configured (-SmtpServer or smtp.json "server") - alert NOT sent.'
         return $false
     }
     $smtp = $null
@@ -591,7 +602,7 @@ function New-AlertBody {
     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $groupLabel = switch ($AlertGroup) {
         'dev'  { 'Dev Team only' }
-        'iver' { 'Iver Support only' }
+        'support' { 'Support Team only' }
         'none' { 'none (should not be reached)' }
         default { 'Both groups' }
     }
@@ -612,7 +623,7 @@ function New-AlertBody {
     if (Test-Path -LiteralPath $LogFile) {
         try {
             # Filter 'Alert sent to:' lines: a dev-only alert body must not leak
-            # the iver group's addresses (and vice versa) via the log tail.
+            # the support group's addresses (and vice versa) via the log tail.
             $tail = @([System.IO.File]::ReadAllLines($LogFile) |
                       Where-Object { $_ -notmatch 'Alert sent to' } |
                       Select-Object -Last 20)
@@ -784,6 +795,18 @@ if (Test-Path -LiteralPath $smtpCfgPath) {
     } catch {
         Write-Log -Level WARNING -Message "Failed to read SMTP config ${smtpCfgPath}: $_"
     }
+}
+
+# No sender configured anywhere: derive one from this computer's DNS domain.
+if (-not $FromAddress) {
+    $dnsDomain = ''
+    try { $dnsDomain = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().DomainName } catch { $dnsDomain = '' }
+    $FromAddress = if ($dnsDomain) { "servicemonitor@$dnsDomain" } else { "servicemonitor@$($Hostname.ToLower()).local" }
+    # Under -NoEmail nothing is mailed, so missing mail settings are informational only.
+    Write-Log -Level $(if ($NoEmail) { 'INFO' } else { 'WARNING' }) -Message "No sender configured - using derived From address $FromAddress (set 'from' in smtp.json)."
+}
+if (-not $SmtpServer) {
+    Write-Log -Level $(if ($NoEmail) { 'INFO' } else { 'WARNING' }) -Message 'No SMTP server configured (-SmtpServer or smtp.json) - alerts will be logged but not emailed.'
 }
 
 # Auto-discover the credential store beside smtp.json when NEITHER file was given

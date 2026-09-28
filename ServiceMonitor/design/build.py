@@ -253,7 +253,7 @@ MONITORED = [
     ("W32Time", "running", "Both"),
     ("wuauserv", "stopped", "Dev only"),
     ("LanmanServer", "running", "Both"),
-    ("LanmanWorkstation", "running", "Iver only"),
+    ("LanmanWorkstation", "running", "Support only"),
     ("Dnscache", "running", "Both"),
     ("BITS", "paused", "None"),
     ("WSearch", "paused", "None"),
@@ -267,7 +267,7 @@ def build_main():
     rows = "".join(svc_row(n, s, a, i == len(MONITORED) - 1)
                    for i, (n, s, a) in enumerate(MONITORED))
     left = (group_title("Monitored services",
-                        "6 checked every 5 minutes &middot; 2 paused &middot; alerts route to Dev Team and Iver Support")
+                        "6 checked every 5 minutes &middot; 2 paused &middot; alerts route to Dev Team and Support Team")
             + card(rows))
 
     arows = "".join(avail_row(n, i == len(AVAILABLE) - 1) for i, n in enumerate(AVAILABLE))
@@ -294,7 +294,7 @@ def build_main():
 
 GROUPS = [
     ("Dev Team", "dev", ["dev.lead@example.com", "oncall@example.com", "dev@example.com"]),
-    ("Iver Support", "iver", ["servicedesk@example.com", "support.lead@example.com"]),
+    ("Support Team", "support", ["servicedesk@example.com", "support.lead@example.com"]),
 ]
 
 
@@ -335,8 +335,8 @@ CHANGES = [
     ("2026-08-26 15:57", "linda", "Added recipient 'oncall@example.com' → dev"),
     ("2026-08-26 11:20", "admin", "Removed 'PrintNotify'"),
     ("2026-08-25 08:14", "admin", "Resumed 'BITS'"),
-    ("2026-08-22 13:45", "admin", "Removed recipient 'dev@example.com' from iver"),
-    ("2026-08-22 13:44", "admin", "Added recipient 'servicedesk@example.com' → iver"),
+    ("2026-08-22 13:45", "admin", "Removed recipient 'dev@example.com' from support"),
+    ("2026-08-22 13:44", "admin", "Added recipient 'servicedesk@example.com' → support"),
     ("2026-08-21 10:03", "admin", "Added 'Dnscache'  alerts=both"),
     ("2026-08-20 09:12", "admin", "Paused 'BITS'"),
 ]

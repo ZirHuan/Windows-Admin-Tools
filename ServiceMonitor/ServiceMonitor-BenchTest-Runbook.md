@@ -72,7 +72,7 @@ Until you set your name, a yellow banner asks you to.
 The landing page. Left column is what is monitored, right column adds more.
 
 - **Status** — green dot Running, red Stopped, grey Paused, amber Unknown.
-- **Alert routing** dropdown — Both / Dev only / Iver only / None. Changes save
+- **Alert routing** dropdown — Both / Dev only / Support only / None. Changes save
   immediately, no Save button.
 - **Pause** (⏸) — keeps the service in the list but skips it on every run. Use
   this for planned maintenance instead of removing it.
@@ -88,7 +88,7 @@ The landing page. Left column is what is monitored, right column adds more.
 
 ## 4. Mail groups view
 
-Two groups, `dev` (Dev Team) and `iver` (Iver Support). Add an address and press
+Two groups, `dev` (Dev Team) and `support` (Support Team). Add an address and press
 **Add**; remove with ✕.
 
 Routing is per service: a service set to *Dev only* mails just the Dev Team list.

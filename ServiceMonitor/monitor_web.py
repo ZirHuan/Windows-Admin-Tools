@@ -43,7 +43,7 @@ DEFAULT_CONFIG = {
     "version": "1.2",
     "groups": {
         "dev":  {"label": "Dev Team",      "recipients": []},
-        "iver": {"label": "Iver Support",  "recipients": []},
+        "support": {"label": "Support Team", "recipients": []},
     },
     "services": [],
 }
@@ -83,7 +83,31 @@ def read_config() -> dict:
     # utf-8-sig tolerates a UTF-8 BOM if some other tool wrote one (PS 5.1's
     # Set-Content -Encoding UTF8 does); plain utf-8 would raise on the BOM.
     with open(CONFIG_FILE, encoding="utf-8-sig") as f:
-        return json.load(f)
+        cfg = json.load(f)
+    if migrate_config(cfg):
+        write_config(cfg)
+    return cfg
+
+
+def migrate_config(cfg: dict) -> bool:
+    """Rename the pre-1.4.0 mail group 'iver' to 'support'. Returns True if changed.
+
+    ServiceMonitor.ps1 reads either key, so a config migrated here keeps working
+    with an older monitor script, and an unmigrated one works with a newer script.
+    """
+    changed = False
+    groups = cfg.setdefault("groups", {})
+    if "iver" in groups and "support" not in groups:
+        grp = groups.pop("iver")
+        if grp.get("label") in (None, "", "Iver Support"):
+            grp["label"] = "Support Team"
+        groups["support"] = grp
+        changed = True
+    for svc in cfg.get("services", []):
+        if svc.get("alerts") == "iver":
+            svc["alerts"] = "support"
+            changed = True
+    return changed
 
 
 def write_config(cfg: dict) -> None:
@@ -860,7 +884,7 @@ def status_badge(status: str) -> str:
 
 
 def alerts_select(svc_name: str, current: str, back: str) -> str:
-    opts = [("both", "Both"), ("dev", "Dev only"), ("iver", "Iver only"), ("none", "None")]
+    opts = [("both", "Both"), ("dev", "Dev only"), ("support", "Support only"), ("none", "None")]
     inner = "".join(
         f'<option value="{v}"{" selected" if v == current else ""}>{label}</option>'
         for v, label in opts
@@ -952,7 +976,7 @@ def build_available_section(monitored_names: set, statuses: dict) -> str:
         '<select id="default-alerts" title="Alert group for newly added services">'
         '<option value="both">Both</option>'
         '<option value="dev">Dev only</option>'
-        '<option value="iver">Iver only</option>'
+        '<option value="support">Support only</option>'
         '<option value="none">None</option>'
         '</select></div>'
         f'<div class="card scroll" id="svc-list">{rows}</div>{count}'
@@ -1022,7 +1046,7 @@ def build_changes_section(lines: list) -> str:
     return f'<div class="card">{rows}</div>'
 
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 
 # The task state is read live rather than assumed from a default, because the
@@ -1720,7 +1744,7 @@ async def set_user(username: str = Form(...), back: str = Form("/")):
 @app.post("/services/add")
 async def service_add(request: Request, name: str = Form(...), alerts: str = Form("both"), back: str = Form("/")):
     user = get_user(request) or "unknown"
-    alerts = alerts if alerts in ("both", "dev", "iver", "none") else "both"
+    alerts = alerts if alerts in ("both", "dev", "support", "none") else "both"
     with _lock:
         cfg = read_config()
         names = {s["name"] for s in cfg["services"]}
@@ -1762,7 +1786,7 @@ async def service_toggle_pause(request: Request, name: str = Form(...), back: st
 @app.post("/services/set-alerts")
 async def service_set_alerts(request: Request, name: str = Form(...), alerts: str = Form(...), back: str = Form("/")):
     user = get_user(request) or "unknown"
-    if alerts not in ("both", "dev", "iver", "none"):
+    if alerts not in ("both", "dev", "support", "none"):
         return RedirectResponse(safe_back(back), status_code=302)
     with _lock:
         cfg = read_config()
@@ -1781,7 +1805,7 @@ async def service_set_alerts(request: Request, name: str = Form(...), alerts: st
 async def recipient_add(request: Request, group: str = Form(...), email: str = Form(...), back: str = Form("/")):
     user = get_user(request) or "unknown"
     email = email.strip().lower()
-    if "@" not in email or group not in ("dev", "iver"):
+    if "@" not in email or group not in ("dev", "support"):
         return RedirectResponse(safe_back(back), status_code=302)
     with _lock:
         cfg = read_config()
@@ -1796,7 +1820,7 @@ async def recipient_add(request: Request, group: str = Form(...), email: str = F
 @app.post("/recipients/remove")
 async def recipient_remove(request: Request, group: str = Form(...), email: str = Form(...), back: str = Form("/")):
     user = get_user(request) or "unknown"
-    if group not in ("dev", "iver"):
+    if group not in ("dev", "support"):
         return RedirectResponse(safe_back(back), status_code=302)
     with _lock:
         cfg = read_config()

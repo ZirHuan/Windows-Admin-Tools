@@ -72,7 +72,7 @@
     share the same .key file).
     Requires elevation: the smtp.key ACL restriction (SYSTEM + Administrators)
     and the usual C:\ServiceMonitor target folder both need admin rights.
-    Version: 1.3.0
+    Version: 1.4.0
 #>
 
 [CmdletBinding()]
