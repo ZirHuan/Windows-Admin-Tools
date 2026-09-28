@@ -6,6 +6,7 @@ own changelogs and their own version numbers:
 - [`AD/CHANGELOG.md`](AD/CHANGELOG.md)
 - [`M365/CHANGELOG-CalendarSharing.md`](M365/CHANGELOG-CalendarSharing.md)
 - [`Mail/CHANGELOG.md`](Mail/CHANGELOG.md)
+- [`DomainScanner/CHANGELOG.md`](DomainScanner/CHANGELOG.md)
 - [`ServiceMonitor/CHANGELOG.md`](ServiceMonitor/CHANGELOG.md)
 
 Format based on [Keep a Changelog](https://keepachangelog.com/).

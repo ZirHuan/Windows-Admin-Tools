@@ -11,3 +11,8 @@ ServiceMonitor/fixed/
 # Local agent + tooling state
 .claude/
 actionlint
+
+# Per-customer DomainScanner configs hold customer data - only the anonymous sample is tracked
+DomainScanner/*.config.json
+!DomainScanner/sample.config.json
+
