@@ -7,7 +7,7 @@
     Runs functional tests against the real ServiceMonitor.ps1 script using
     temporary files in $env:TEMP. No real SMTP is used (-NoEmail throughout).
     No services are stopped or modified - tests use already-running services
-    (Spooler) or fake service names.
+    (EventLog) or fake service names.
 
     Prerequisites:
         Install-Module -Name Pester -MinimumVersion 5.0 -Force -Scope CurrentUser
@@ -96,7 +96,7 @@ Describe 'Startup banner' -Tag Quick {
         # The expected version is read from the script rather than hardcoded: a
         # literal here silently rotted from v1.2.5 through the v1.3.0 release and
         # only surfaced once an unrelated CI break was fixed.
-        $log = Invoke-SM -ServicesContent 'Spooler'
+        $log = Invoke-SM -ServicesContent 'EventLog'
         $log | Should -Match ('ServiceMonitor v' + [regex]::Escape($script:ScriptVersion))
         $log | Should -Match $env:COMPUTERNAME
     }
@@ -104,13 +104,13 @@ Describe 'Startup banner' -Tag Quick {
 
 # ---------------------------------------------------------------------------
 Describe 'Running service' -Tag Quick {
-    It 'Logs OK for Print Spooler (expected to be running)' {
-        $log = Invoke-SM -ServicesContent 'Spooler'
-        $log | Should -Match "OK: 'Spooler' is running"
+    It 'Logs OK for EventLog (always running)' {
+        $log = Invoke-SM -ServicesContent 'EventLog'
+        $log | Should -Match "OK: 'EventLog' is running"
     }
 
     It 'Does not log WARNING or ERROR for a healthy service' {
-        $log = Invoke-SM -ServicesContent 'Spooler'
+        $log = Invoke-SM -ServicesContent 'EventLog'
         # Legacy flat-file mode always logs ONE warning that monitor-config.json
         # is absent; that is expected here and unrelated to service health.
         $relevant = ($log -split "`r?`n" |
@@ -123,7 +123,7 @@ Describe 'Running service' -Tag Quick {
         $id      = [System.IO.Path]::GetRandomFileName()
         $svcFile = Join-Path $script:TestRoot "svc_$id.txt"
         $logFile = Join-Path $script:TestRoot "log_$id.log"
-        'Spooler' | Set-Content -Path $svcFile -Encoding UTF8
+        'EventLog' | Set-Content -Path $svcFile -Encoding UTF8
 
         & $script:ScriptPath `
             -ServicesFile    $svcFile `
@@ -138,13 +138,13 @@ Describe 'Running service' -Tag Quick {
 # ---------------------------------------------------------------------------
 Describe 'Paused services' -Tag Quick {
     It 'Skips a service prefixed with *' {
-        $log = Invoke-SM -ServicesContent "* NonExistentService_PAUSED`nSpooler"
+        $log = Invoke-SM -ServicesContent "* NonExistentService_PAUSED`nEventLog"
         $log | Should -Match 'Paused.*NonExistentService_PAUSED'
-        $log | Should -Match "OK: 'Spooler'"
+        $log | Should -Match "OK: 'EventLog'"
     }
 
     It 'Skips a service prefixed with -' {
-        $log = Invoke-SM -ServicesContent "- NonExistentService_PAUSED`nSpooler"
+        $log = Invoke-SM -ServicesContent "- NonExistentService_PAUSED`nEventLog"
         $log | Should -Match 'Paused.*NonExistentService_PAUSED'
     }
 
@@ -162,12 +162,12 @@ Describe 'Comment and blank lines in services.txt' -Tag Quick {
     It 'Ignores comment lines and blank lines' {
         $content = @"
 # This is a comment
-Spooler
+EventLog
 
 # Another comment
 "@
         $log = Invoke-SM -ServicesContent $content
-        $log | Should -Match "OK: 'Spooler'"
+        $log | Should -Match "OK: 'EventLog'"
         $log | Should -Not -Match 'comment'
     }
 }
@@ -272,7 +272,7 @@ Describe 'Log rotation' {
         $id      = [System.IO.Path]::GetRandomFileName()
         $svcFile = Join-Path $script:TestRoot "svc_$id.txt"
         $logFile = Join-Path $script:TestRoot "log_$id.log"
-        'Spooler' | Set-Content -Path $svcFile -Encoding UTF8
+        'EventLog' | Set-Content -Path $svcFile -Encoding UTF8
 
         # Pre-populate log with content so it is non-empty
         'existing log content' | Set-Content -Path $logFile -Encoding UTF8
@@ -291,7 +291,7 @@ Describe 'Log rotation' {
         $id      = [System.IO.Path]::GetRandomFileName()
         $logFile = Join-Path $script:TestRoot "log_rotate_$id.log"
         $svcFile = Join-Path $script:TestRoot "svc_$id.txt"
-        'Spooler' | Set-Content -Path $svcFile -Encoding UTF8
+        'EventLog' | Set-Content -Path $svcFile -Encoding UTF8
 
         # Simulate existing backups
         'run 1' | Set-Content "$logFile.1" -Encoding UTF8
@@ -375,12 +375,12 @@ Describe 'SMTP credential files' -Tag Quick {
 # ---------------------------------------------------------------------------
 Describe 'Summary line' -Tag Quick {
     It 'Logs check complete summary with failure count' {
-        $log = Invoke-SM -ServicesContent "Spooler`nNonExistentService_XYZ_12345"
+        $log = Invoke-SM -ServicesContent "EventLog`nNonExistentService_XYZ_12345"
         $log | Should -Match 'Check complete\. Failures: 1 / 2'
     }
 
     It 'Logs 0 failures when all services are healthy' {
-        $log = Invoke-SM -ServicesContent 'Spooler'
+        $log = Invoke-SM -ServicesContent 'EventLog'
         $log | Should -Match 'Failures: 0 / 1'
     }
 }
@@ -396,7 +396,7 @@ Describe 'Explicit missing config file' -Tag Quick {
         $svcFile = Join-Path $script:TestRoot "svc_$id.txt"
         $logFile = Join-Path $script:TestRoot "log_$id.log"
         $missing = Join-Path $script:TestRoot "absent-config-$id.json"   # must not exist
-        'Spooler' | Set-Content -Path $svcFile -Encoding UTF8
+        'EventLog' | Set-Content -Path $svcFile -Encoding UTF8
 
         & $script:ScriptPath `
             -ConfigFile      $missing `
@@ -409,6 +409,6 @@ Describe 'Explicit missing config file' -Tag Quick {
         $log = [System.IO.File]::ReadAllText($logFile)
         $log | Should -Match 'Config file explicitly specified but not found'
         # Must NOT have silently used the legacy services file
-        $log | Should -Not -Match "OK: 'Spooler'"
+        $log | Should -Not -Match "OK: 'EventLog'"
     }
 }

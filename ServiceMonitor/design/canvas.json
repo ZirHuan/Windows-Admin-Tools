@@ -1,0 +1,20 @@
+{
+  "artboards": [
+    { "file": "Main.dc.html",       "x": 0,    "y": 0,    "w": 1440, "h": 880 },
+    { "file": "Groups.dc.html",     "x": 1560, "y": 0,    "w": 1440, "h": 880 },
+    { "file": "Log.dc.html",        "x": 3120, "y": 0,    "w": 1440, "h": 880 },
+    { "file": "SignIn.dc.html",     "x": 0,    "y": 1060, "w": 900,  "h": 600 },
+    { "file": "Components.dc.html", "x": 1080, "y": 1060, "w": 1120, "h": 1320 }
+  ],
+  "annotations": [
+    { "id": "note-source", "x": 0, "y": -190, "w": 420,
+      "text": "Palette and metrics are real libadwaita dark values, not invented ones.\nWindow #242424 / chrome #303030 / cards 8% white / accent #3584e4.\nCards 12px, buttons and entries 6px, header bar 47px." },
+    { "id": "note-sample", "x": 1560, "y": -190, "w": 420,
+      "text": "Service names come from your services.txt. Statuses, recipients\nand log lines are sample data for the mockup - the log lines do\nuse the real format that log_change() writes." },
+    { "id": "note-nochrome", "x": 3120, "y": -190, "w": 420,
+      "text": "No fake window buttons: this runs in a browser at 127.0.0.1:8080,\nso a painted minimise/maximise/close strip would sit doubled up\nunder the real browser chrome." },
+    { "id": "note-port", "x": 2300, "y": 1060, "w": 300,
+      "text": "This sheet is the porting target - every value here maps to a rule\nin the CSS string in monitor_web.py." }
+  ],
+  "launch": { "view": "canvas" }
+}

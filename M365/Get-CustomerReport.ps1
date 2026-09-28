@@ -31,8 +31,8 @@
 .EXAMPLE
     .\Get-CustomerReport.ps1 -TenantId "contoso.com" -AdminUPN "admin@contoso.com" -TenantName "Contoso"
 .NOTES
-    Authors:  Rosvall & Claude
-    Version:  1.5.4
+    Authors:  Windows-Admin-Tools contributors
+    Version:  1.6.0
     Changelog:
         1.0.0 - Initial release
         1.1.0 - Fix IsExternal to check all verified tenant domains (not only primary)
@@ -60,19 +60,18 @@
               - Ask whether to save to customers.json at the start, not at the end
               - Output path prompt for new tenants deferred until after tenant is identified
               - Org data fetched once and reused (no duplicate API call)
-        1.3.4 - Add -IverBranding switch: dark theme, Iver yellow (#FCDE06) accents, logo
-                embedded as base64 in header and footer (self-contained HTML, no external assets)
-              - Requires Iver-BrandConfig.ps1 and iver-complete-neg.png alongside the script
+        1.3.4 - Add branding switch: dark theme, brand accent colour, logo embedded as base64
+                in header and footer (self-contained HTML, no external assets)
         1.3.5 - Fix: -TenantId now matches by ShortName, TenantId field, or PrimaryDomain in
                 customers.json — so -TenantId "Contoso" loads the profile and uses its
                 real TenantId instead of passing the short name to Connect-MgGraph
-        1.3.6 - IverBranding: replace emoji section icons with official Iver branded icons
+        1.3.6 - Branding: replace emoji section icons with branded icons
                 (base64-embedded PNGs from Ikoner\ folder next to the script); falls back to
                 emoji if Ikoner\ folder is absent
         1.4.0 - Split Subscriptions & Licenses section into Paid and Free/Auto-provisioned tables
               - Conditional Access table expanded with Users scope, Apps scope, and Grant Controls columns
               - Intune compliance breakdown: Compliant / Non-Compliant / Unknown stat cards + non-compliant device list
-              - Nav bar icons use branded PNGs when -IverBranding active (same Ikoner\ source as section headings)
+              - Nav bar icons use branded PNGs when branding is active (same Ikoner\ source as section headings)
               - New findings: Global Admin count > 3 (MEDIUM); licensed users with password age > 365 days (MEDIUM)
         1.5.0 - Delta / comparison section: loads ALL historical runs in <shortname>.source\
                 and computes metrics for each (Licensed, Guests, No MFA, Inactive, Pwd >1yr,
@@ -95,6 +94,10 @@
                 Pure white background, solid borders, high-contrast text, search/nav hidden at print time
                 @media print: color-adjust:exact so backgrounds/badges print correctly; page-break-inside:avoid on cards/findings
                 Compatible with -OutputFormat PDF for clean black-and-white or colour printouts
+        1.6.0 - Branding is now generic and configurable: -Branding switch (old switch name kept
+                as an alias), colours / company name / logo / icon folder read from an optional
+                brand.json beside the script (see brand.sample.json); neutral defaults without it
+              - Footer shows the real script version (was stuck at 1.5.3); author credit neutral
 #>
 
 [CmdletBinding()]
@@ -114,8 +117,9 @@ param(
     [switch]$UpdateCustomerProfile,
     # Automatically disconnect from Graph and Exchange Online after completion without prompting
     [switch]$DisconnectAfter,
-    # Apply Iver brand identity: dark theme, Iver yellow accents, logo embedded in header and footer
-    [switch]$IverBranding,
+    # Apply brand identity from brand.json (dark theme, accent colour, logo in header and footer)
+    [Alias('IverBranding')]
+    [switch]$Branding,
     # White print-friendly theme: solid borders, @media print rules, nav hidden on print, no shadows
     [switch]$PrintFriendly,
     # Output format: HTML (default) | PDF (Edge headless) | Markdown | JsonOnly (no report file)
@@ -881,7 +885,7 @@ if ($org.TechnicalNotificationMails) {
             Severity = "LOW"
             Title    = "Technical notification email set to external domain"
             Detail   = "Notifications currently sent to: $($extMails -join ', ')"
-            Action   = "Update technical notification email in M365 Admin Center to an Iver address."
+            Action   = "Update technical notification email in M365 Admin Center to an address your service desk monitors."
         })
     }
 }
@@ -1406,26 +1410,47 @@ $mfaNote     = if ($mfaError) { " | MFA data: unavailable" } else { "" }
 $mfaNoteHtml = if ($mfaError) { "<div class='warning' style='margin:0 0 16px'>&#9888; MFA registration data could not be retrieved. Reconnect to Microsoft Graph with the <strong>UserAuthenticationMethod.Read.All</strong> scope included to populate the MFA column.</div>" } else { "" }
 
 # ── BRAND SETUP ───────────────────────────────────────────────────────────────
+$ScriptVersion  = '1.6.0'
 $logoB64Html    = ""
 $footerLogoHtml = ""
-if ($IverBranding) {
-    $logoFile = Join-Path $PSScriptRoot "iver-complete-neg.png"
+# Brand values: neutral defaults, overridden by brand.json beside the script (kept out of git).
+$brand = [ordered]@{
+    CompanyName     = ''
+    AccentColor     = '#0078D4'
+    BackgroundColor = '#505050'
+    BackgroundDark  = '#323232'
+    LogoFile        = 'brand-logo.png'
+    IconFolder      = 'Ikoner'
+}
+if ($Branding) {
+    $brandFile = Join-Path $PSScriptRoot 'brand.json'
+    if (Test-Path $brandFile) {
+        try {
+            $bj = Get-Content -Path $brandFile -Raw | ConvertFrom-Json
+            foreach ($k in @($brand.Keys)) {
+                if ($bj.PSObject.Properties[$k] -and $bj.$k) { $brand[$k] = [string]$bj.$k }
+            }
+        } catch { Write-Warning "Branding: could not read $brandFile - using neutral defaults. $_" }
+    } else {
+        Write-Warning "Branding: $brandFile not found - using neutral defaults (copy brand.sample.json)."
+    }
+    $logoFile = Join-Path $PSScriptRoot $brand.LogoFile
     if (Test-Path $logoFile) {
         $b64            = [Convert]::ToBase64String([IO.File]::ReadAllBytes($logoFile))
-        $logoB64Html    = "<img src='data:image/png;base64,$b64' style='height:36px;margin-bottom:10px;display:block' alt='Iver' />"
-        $footerLogoHtml = "<img src='data:image/png;base64,$b64' style='height:20px;opacity:.7;vertical-align:middle;margin-right:6px' alt='Iver' />"
+        $logoB64Html    = "<img src='data:image/png;base64,$b64' style='height:36px;margin-bottom:10px;display:block' alt='$($brand.CompanyName)' />"
+        $footerLogoHtml = "<img src='data:image/png;base64,$b64' style='height:20px;opacity:.7;vertical-align:middle;margin-right:6px' alt='$($brand.CompanyName)' />"
     } else {
-        Write-Warning "IverBranding: logo not found at $logoFile — header will have no logo."
+        Write-Warning "Branding: logo not found at $logoFile — header will have no logo."
     }
 }
 
-# Section icon variables — emoji fallbacks replaced by Iver PNGs when -IverBranding and Ikoner\ folder exists
+# Section icon variables — emoji fallbacks replaced by branded PNGs when -Branding and the icon folder exists
 $siFindings = "&#128680;"; $siTenant = "&#127970;"; $siLicenses = "&#128196;"
 $siUsers    = "&#128101;"; $siAdmins  = "&#128272;"; $siGroups   = "&#128101;"
 $siCA       = "&#128274;"; $siDevices = "&#128187;"; $siExchange = "&#128231;"
 $siDelta    = "&#128200;"
-if ($IverBranding) {
-    $iconDir = Join-Path $PSScriptRoot "Ikoner"
+if ($Branding) {
+    $iconDir = Join-Path $PSScriptRoot $brand.IconFolder
     $siDefs = [ordered]@{
         siFindings = 'warning.png'; siTenant = 'globe.png';    siLicenses = 'box.png'
         siUsers    = 'user.png';    siAdmins = 'key.png';      siGroups   = 'group.png'
@@ -1441,25 +1466,25 @@ if ($IverBranding) {
     }
 }
 
-$cssBlock = if ($IverBranding) {
+$cssBlock = if ($Branding) {
 @"
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Arial Nova',Arial,sans-serif;background:#505050;color:#ffffff;font-size:14px}
-header{background:linear-gradient(135deg,#323232 0%,#505050 100%);color:white;padding:24px 40px;border-bottom:4px solid #FCDE06}
+body{font-family:'Arial Nova',Arial,sans-serif;background:$($brand.BackgroundColor);color:#ffffff;font-size:14px}
+header{background:linear-gradient(135deg,$($brand.BackgroundDark) 0%,$($brand.BackgroundColor) 100%);color:white;padding:24px 40px;border-bottom:4px solid $($brand.AccentColor)}
 header h1{font-size:22px;font-weight:600;color:#ffffff}
 header p{font-size:13px;color:#A0A0A0;margin-top:4px}
-nav{background:#323232;border-bottom:1px solid #404040;padding:0 32px;display:flex;gap:0;position:sticky;top:0;z-index:100;box-shadow:0 1px 3px rgba(0,0,0,.4);overflow-x:auto}
+nav{background:$($brand.BackgroundDark);border-bottom:1px solid #404040;padding:0 32px;display:flex;gap:0;position:sticky;top:0;z-index:100;box-shadow:0 1px 3px rgba(0,0,0,.4);overflow-x:auto}
 nav a{display:block;padding:13px 14px;font-size:12px;font-weight:600;color:#A0A0A0;text-decoration:none;border-bottom:3px solid transparent;white-space:nowrap}
-nav a:hover{color:#FCDE06;border-bottom-color:#FCDE06}
+nav a:hover{color:$($brand.AccentColor);border-bottom-color:$($brand.AccentColor)}
 main{max-width:1500px;margin:0 auto;padding:24px 40px}
 .section{background:rgba(255,255,255,0.04);border-radius:4px;padding:24px;margin-bottom:20px;box-shadow:0 1px 3px rgba(0,0,0,.3);border:1px solid rgba(130,130,130,0.3)}
-.section h2{font-size:16px;font-weight:600;color:#FCDE06;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid rgba(130,130,130,0.3)}
+.section h2{font-size:16px;font-weight:600;color:$($brand.AccentColor);margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid rgba(130,130,130,0.3)}
 .si{width:18px;height:18px;vertical-align:middle;margin-right:8px;filter:invert(1);opacity:.85;position:relative;top:-1px}
 .section h3{font-size:13px;font-weight:600;color:#D2D2D2;margin:20px 0 10px}
 .stat-grid{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}
-.stat-card{background:rgba(255,255,255,0.06);border-radius:4px;padding:16px 20px;min-width:130px;flex:1;border-top:4px solid #FCDE06!important;border:1px solid rgba(130,130,130,0.3)}
-.stat-value{font-size:28px;font-weight:700;color:#FCDE06}
+.stat-card{background:rgba(255,255,255,0.06);border-radius:4px;padding:16px 20px;min-width:130px;flex:1;border-top:4px solid $($brand.AccentColor)!important;border:1px solid rgba(130,130,130,0.3)}
+.stat-value{font-size:28px;font-weight:700;color:$($brand.AccentColor)}
 .stat-label{font-size:12px;color:#A0A0A0;margin-top:2px}
 .info-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px;margin-bottom:16px}
 .info-grid div{background:rgba(255,255,255,0.05);padding:12px 16px;border-radius:4px;border:1px solid rgba(130,130,130,0.3)}
@@ -1467,15 +1492,15 @@ main{max-width:1500px;margin:0 auto;padding:24px 40px}
 .info-grid .value{display:block;font-size:14px;font-weight:600;margin-top:2px;color:#ffffff}
 .score-card{background:rgba(255,255,255,0.05);border-radius:4px;padding:16px 24px;min-width:180px;border:1px solid rgba(130,130,130,0.3);align-self:flex-start}
 .score-label{font-size:11px;color:#A0A0A0;text-transform:uppercase;letter-spacing:.5px}
-.score-num{font-size:32px;font-weight:700;color:#FCDE06;margin:4px 0 2px}
+.score-num{font-size:32px;font-weight:700;color:$($brand.AccentColor);margin:4px 0 2px}
 .score-max{font-size:15px;color:#A0A0A0;font-weight:400}
 .score-bar-bg{background:#404040;border-radius:4px;height:8px;margin:6px 0 4px}
 .score-bar{height:8px;border-radius:4px}
 .score-pct{font-size:12px;color:#A0A0A0}
 .tenant-top{display:flex;gap:20px;align-items:flex-start;flex-wrap:wrap}
 table{width:100%;border-collapse:collapse;font-size:13px;margin-top:6px}
-thead{background:#323232}
-th{text-align:left;padding:10px 12px;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:#FCDE06;border-bottom:2px solid #FCDE06;cursor:pointer;white-space:nowrap}
+thead{background:$($brand.BackgroundDark)}
+th{text-align:left;padding:10px 12px;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:$($brand.AccentColor);border-bottom:2px solid $($brand.AccentColor);cursor:pointer;white-space:nowrap}
 th:hover{background:#404040}
 td{padding:9px 12px;border-bottom:1px solid rgba(130,130,130,0.2);vertical-align:middle;color:#ffffff}
 tr:hover td{background:rgba(252,222,6,0.05)}
@@ -1486,35 +1511,35 @@ tr:last-child td{border-bottom:none}
 .finding{border-radius:4px;padding:16px 20px;margin-bottom:12px;border-left:5px solid #828282}
 .finding-high{background:rgba(232,17,35,0.1);border-left-color:#e81123}
 .finding-medium{background:rgba(216,59,1,0.1);border-left-color:#d83b01}
-.finding-low{background:rgba(252,222,6,0.08);border-left-color:#FCDE06}
+.finding-low{background:rgba(252,222,6,0.08);border-left-color:$($brand.AccentColor)}
 .finding-head{display:flex;align-items:center;gap:10px;margin-bottom:8px}
 .finding p{font-size:13px;color:#D2D2D2}
 .action-line{margin-top:8px!important;font-size:12px!important;color:#A0A0A0!important;font-style:italic}
 .badge{display:inline-block;padding:3px 10px;border-radius:12px;font-size:11px;font-weight:700;letter-spacing:.5px}
 .badge-high{background:#e81123;color:white}
 .badge-medium{background:#d83b01;color:white}
-.badge-low{background:#FCDE06;color:#323232}
+.badge-low{background:$($brand.AccentColor);color:$($brand.BackgroundDark)}
 .badge-ext{background:#e81123;color:white;font-size:10px;padding:2px 6px;border-radius:10px;font-weight:700}
 .badge-guest{background:#8764b8;color:white;font-size:10px;padding:2px 6px;border-radius:10px}
 .badge-never{color:#F44336;font-weight:700}
 .badge-yes{background:#4CAF50;color:white;font-size:11px;padding:2px 8px;border-radius:10px}
 .badge-no{background:#F44336;color:white;font-size:11px;padding:2px 8px;border-radius:10px}
-.pill{display:inline-block;background:rgba(252,222,6,0.15);color:#FCDE06;padding:2px 8px;border-radius:10px;margin:2px;font-size:11px;white-space:nowrap}
+.pill{display:inline-block;background:rgba(252,222,6,0.15);color:$($brand.AccentColor);padding:2px 8px;border-radius:10px;margin:2px;font-size:11px;white-space:nowrap}
 .ok{color:#4CAF50;font-weight:600}
 .bad{color:#F44336;font-weight:600}
 .na{color:#828282;font-style:italic}
 .empty{color:#A0A0A0;font-style:italic;padding:12px 0}
-.warning{background:rgba(255,185,0,0.1);border-left:4px solid #FCDE06;padding:12px 16px;border-radius:0 4px 4px 0;color:#D2D2D2;margin:6px 0}
+.warning{background:rgba(255,185,0,0.1);border-left:4px solid $($brand.AccentColor);padding:12px 16px;border-radius:0 4px 4px 0;color:#D2D2D2;margin:6px 0}
 .search-bar{margin:12px 0;padding:10px;background:#404040;border-radius:4px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-.search-bar input{flex:1;min-width:200px;max-width:360px;padding:7px 12px;border:1px solid #828282;border-radius:4px;font-size:13px;background:#505050;color:#ffffff}
-.search-bar input:focus{outline:none;border-color:#FCDE06}
-.filter-btn{padding:5px 12px;border:1px solid #828282;background:#505050;cursor:pointer;border-radius:4px;font-size:12px;font-weight:600;color:#D2D2D2;transition:all .15s}
-.filter-btn:hover{border-color:#FCDE06;color:#FCDE06}
-.filter-btn.active{background:#FCDE06;color:#323232;border-color:#FCDE06}
+.search-bar input{flex:1;min-width:200px;max-width:360px;padding:7px 12px;border:1px solid #828282;border-radius:4px;font-size:13px;background:$($brand.BackgroundColor);color:#ffffff}
+.search-bar input:focus{outline:none;border-color:$($brand.AccentColor)}
+.filter-btn{padding:5px 12px;border:1px solid #828282;background:$($brand.BackgroundColor);cursor:pointer;border-radius:4px;font-size:12px;font-weight:600;color:#D2D2D2;transition:all .15s}
+.filter-btn:hover{border-color:$($brand.AccentColor);color:$($brand.AccentColor)}
+.filter-btn.active{background:$($brand.AccentColor);color:$($brand.BackgroundDark);border-color:$($brand.AccentColor)}
 .legend{display:flex;gap:14px;margin:6px 0 10px;font-size:12px;flex-wrap:wrap;color:#A0A0A0}
 .legend-item{display:flex;align-items:center;gap:6px}
 .ldot{width:12px;height:12px;border-radius:2px;flex-shrink:0}
-footer{text-align:center;padding:20px;color:#A0A0A0;font-size:12px;border-top:1px solid #505050}
+footer{text-align:center;padding:20px;color:#A0A0A0;font-size:12px;border-top:1px solid $($brand.BackgroundColor)}
 .delta-meta{font-size:12px;color:#A0A0A0;margin-bottom:16px}
 .delta-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-bottom:20px}
 .delta-card{background:rgba(255,255,255,0.06);border-radius:4px;padding:14px 16px;border:1px solid rgba(130,130,130,0.3)}
@@ -1528,7 +1553,7 @@ footer{text-align:center;padding:20px;color:#A0A0A0;font-size:12px;border-top:1p
 .delta-better .delta-change{background:rgba(76,175,80,0.15);color:#4CAF50}
 .delta-worse  .delta-curr{color:#F44336}
 .delta-worse  .delta-change{background:rgba(244,67,54,0.15);color:#F44336}
-.delta-neutral .delta-curr{color:#FCDE06}
+.delta-neutral .delta-curr{color:$($brand.AccentColor)}
 .delta-neutral .delta-change{background:rgba(252,222,6,0.1);color:#A0A0A0}
 .delta-chart{margin:12px 0 4px}
 .delta-sparkgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;margin:10px 0 4px}
@@ -1738,7 +1763,7 @@ footer{text-align:center;padding:20px;color:#605e5c;font-size:12px}
 "@
 }
 
-$reportHeaderHtml = if ($IverBranding) {
+$reportHeaderHtml = if ($Branding) {
 @"
 <header>
   $logoB64Html
@@ -1762,13 +1787,13 @@ $reportHeaderHtml = if ($IverBranding) {
 "@
 }
 
-$reportFooterHtml = if ($IverBranding) {
+$reportFooterHtml = if ($Branding) {
 @"
-<footer>${footerLogoHtml}Get-CustomerReport.ps1 v1.5.3 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\<br><small style="opacity:.6">&copy; $(Get-Date -Format 'yyyy') Iver Managed Services</small></footer>
+<footer>${footerLogoHtml}Get-CustomerReport.ps1 v$ScriptVersion &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\$(if ($brand.CompanyName) { "<br><small style='opacity:.6'>&copy; $(Get-Date -Format 'yyyy') $($brand.CompanyName)</small>" })</footer>
 "@
 } else {
 @"
-<footer>Get-CustomerReport.ps1 v1.5.3 &mdash; Rosvall &amp; Claude &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\</footer>
+<footer>Get-CustomerReport.ps1 v$ScriptVersion &bull; $EffectiveTenantName &bull; $reportDate &bull; Raw data: $shortName.source\$sourceTimestamp\</footer>
 "@
 }
 

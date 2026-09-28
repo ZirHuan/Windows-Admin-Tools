@@ -42,7 +42,7 @@
     .\install-monitor-web.ps1 -Port 9090 -SkipMigration
 
 .NOTES
-    Version: 1.3.0
+    Version: 1.4.0
     To remove: nssm remove ServiceMonitorWeb confirm
 #>
 
@@ -479,7 +479,7 @@ if (-not (Test-Path -LiteralPath $configDest)) {
             version  = '1.2'
             groups   = @{
                 dev  = @{ label = 'Dev Team';     recipients = @() }
-                iver = @{ label = 'Iver Support'; recipients = @() }
+                support = @{ label = 'Support Team'; recipients = @() }
             }
             services = @()
         }
@@ -608,7 +608,7 @@ Write-Host "  Service: $ServiceName (auto-start, runs as LocalSystem)"
 Write-Host ''
 Write-Host 'Next steps:' -ForegroundColor Cyan
 Write-Host "  1. Open http://localhost:$Port in a browser"
-Write-Host '  2. Add mail recipients to each group (Dev Team / Iver Support)'
+Write-Host '  2. Add mail recipients to each group (Dev Team / Support Team)'
 Write-Host '  3. Add services to monitor from the right panel'
 Write-Host ''
 Write-Host 'Best practice: run the two setup scripts from the INSTALLED folder' -ForegroundColor Yellow

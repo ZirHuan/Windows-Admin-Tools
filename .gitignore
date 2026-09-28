@@ -11,3 +11,15 @@ ServiceMonitor/fixed/
 # Local agent + tooling state
 .claude/
 actionlint
+
+# Per-customer DomainScanner configs hold customer data - only the anonymous sample is tracked
+DomainScanner/*.config.json
+!DomainScanner/sample.config.json
+
+# Published design/runbook artifact bundles (generated; sources are *.dc.html + build.py)
+ServiceMonitor/design/servicemonitor-*.html
+
+# M365 report branding is local: real brand values, logo and icons never go to git
+M365/brand.json
+M365/brand-logo.png
+M365/Ikoner/
