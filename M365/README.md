@@ -130,6 +130,22 @@ an Exchange admin role. Localised tenants: the Calendar folder may be named in t
 [KB 4021947 — private appointments on shared calendars](https://learn.microsoft.com/troubleshoot/outlook/calendaring/outlook-or-owa-not-shows-full-details-of-private-appointments) ·
 [Purview sensitivity labels for meetings](https://learn.microsoft.com/purview/sensitivity-labels-meetings)
 
+## Report branding
+
+`Get-CustomerReport.ps1 -Branding` renders the report in a dark theme with your own
+accent colour, company name and logo. The values come from `brand.json` next to the
+script; copy `brand.sample.json` to `brand.json` and edit it:
+
+| Key | Meaning |
+|---|---|
+| `CompanyName` | Shown in the footer copyright line and as logo alt text |
+| `AccentColor` / `BackgroundColor` / `BackgroundDark` | Theme colours |
+| `LogoFile` | PNG beside the script, embedded as base64 (default `brand-logo.png`) |
+| `IconFolder` | Folder of section-icon PNGs (default `Ikoner`) |
+
+`brand.json`, the logo and the icon folder are git-ignored - brand assets stay local.
+Without `brand.json` the switch uses neutral defaults.
+
 ## Configuration
 
 ### customers.json
@@ -239,4 +255,4 @@ These scripts are provided as-is for M365 management and reporting.
 
 ## Authors
 
-- Rosvall & Claude
+- Windows-Admin-Tools contributors
