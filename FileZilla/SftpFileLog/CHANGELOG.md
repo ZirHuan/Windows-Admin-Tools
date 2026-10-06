@@ -10,7 +10,8 @@ Git tags for this tool are prefixed `filezilla-sftp-log-v*`.
 ## [1.0.0] - 2026-10-06
 
 First public release, generalised from a tool used in production on a
-FileZilla Pro Enterprise Server 1.9.4.
+FileZilla Pro Enterprise Server 1.9.4, deployed and running on Windows
+PowerShell 5.1. Also tested on PowerShell 7.
 
 ### Added
 - `Export-SftpFileLog.ps1`: daily CSVs of Upload / Download / Delete / Rename /

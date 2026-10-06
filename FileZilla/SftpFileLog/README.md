@@ -22,6 +22,8 @@ Actions: `Upload`, `Download`, `Delete`, `Rename`, `CreateDir`,
   SFTP logging at a level that records file operations (`Opening file`,
   `Removing file`, `Renaming entity`, `Creating directory`).
 - Windows PowerShell 5.1 or PowerShell 7. No modules.
+  Verified in production on **Windows PowerShell 5.1** (scheduled task + export +
+  web page); also tested on PowerShell 7.
 - The old FileZilla Server 0.9.x (plain FTP, `fzs-*.log`) uses a different log
   format and is **not** supported.
 
