@@ -7,6 +7,7 @@ own changelogs and their own version numbers:
 - [`M365/CHANGELOG-CalendarSharing.md`](M365/CHANGELOG-CalendarSharing.md)
 - [`Mail/CHANGELOG.md`](Mail/CHANGELOG.md)
 - [`ServiceMonitor/CHANGELOG.md`](ServiceMonitor/CHANGELOG.md)
+- [`FileZilla/SftpFileLog/CHANGELOG.md`](FileZilla/SftpFileLog/CHANGELOG.md)
 
 Format based on [Keep a Changelog](https://keepachangelog.com/).
 Git tags are per-tool and prefixed with the tool name (this repo holds multiple
