@@ -1,0 +1,12 @@
+{
+  "KnownRiskAccounts": ["vendor.account", "svc-example"],
+  "ExpectedSites": ["Site-Main"],
+  "StaleDCNames": ["OLD-DC01", "OLD-DC02"],
+  "StaleIPs": ["10.x.x.x"],
+  "ExpectedFsmoHolder": "DC01",
+  "DeadCAHostname": "ca01.CUSTOMER.local",
+  "DeadCAIssuerMatch": "CN=CA, DC=CUSTOMER, DC=local",
+  "ServiceAcctRegex": "^(svc[-_]|sa[-_]|sql|exchange|iis|backup|print|scan|service|mssql)",
+  "AdminAcctRegex": "^(adm\\.|admin\\.)",
+  "Skip": []
+}

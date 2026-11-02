@@ -11,3 +11,11 @@ ServiceMonitor/fixed/
 # Local agent + tooling state
 .claude/
 actionlint
+
+# Customer-specific config files (contain live tenant data)
+customers.json
+*.local.json
+config.json
+
+# Logs
+*.log
