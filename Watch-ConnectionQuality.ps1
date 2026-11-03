@@ -5,7 +5,7 @@
     Övervakar anslutningskvalitet (latens, jitter, paketförlust) mot en eller flera mål och loggar till CSV.
 .DESCRIPTION
     Skickar en serie ICMP-pingar per mätintervall och räknar ut min/medel/max-latens, jitter och paketförlust.
-    Default gateway läggs automatiskt till som mål såUnblock-File -Path 'C:\iver\Watch-ConnectionQuality.ps1' att man kan skilja på lokala problem (LAN/WiFi)
+    Default gateway läggs automatiskt till som mål så att man kan skilja på lokala problem (LAN/WiFi)
     och problem längre ut (ISP/internet).
 
     Filer som skapas i -LogDirectory (en uppsättning per körning, namngiven efter starttiden):
@@ -35,10 +35,11 @@
     CSV-avgränsare. Default är systemets listavgränsare (';' på svenska Windows), vilket matchar
     decimaltecknet så att filen öppnas direkt i Excel.
 .NOTES
-    Version: 1.1.0
+    Version: 1.1.1
     Datum:   2026-11-03
 
     Ändringslogg:
+      1.1.1  2026-11-03  Rättat inklistrad rad i hjälptexten (.DESCRIPTION).
       1.1.0  2026-11-03  Loggfiler namnges efter starttid (yyyyMMdd_HHmm) - egna filer per körning.
                          Versionsnummer skrivs i händelseloggen vid start.
       1.0.0  2026-11-03  Första version: latens, jitter, paketförlust, gateway-detektering,
@@ -85,7 +86,7 @@ param(
 )
 
 # --- Variables ---
-$ScriptVersion = '1.1.0'   # Håll i synk med .NOTES
+$ScriptVersion = '1.1.1'   # Håll i synk med .NOTES
 $ComputerName = $env:COMPUTERNAME
 # Starttid i filnamnet ger egna filer per körning (krockar inte heller om flera instanser körs parallellt)
 $RunStamp     = Get-Date -Format 'yyyyMMdd_HHmm'
