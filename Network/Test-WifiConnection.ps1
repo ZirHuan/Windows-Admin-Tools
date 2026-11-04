@@ -59,6 +59,12 @@
     Minuter mellan hastighetstester. Forsta testet kors 10 s efter start.
     Standard 180 (var tredje timme). 0 = inga hastighetstester.
 
+.PARAMETER SpeedTestOnly
+    Bara hastighetstest: testar varje valt kort EN gang (ned + upp), skriver ut
+    resultatet och avslutar. Ingen latensmatning och ingen latens-CSV.
+    -DurationSec, -IntervalMs och -SpeedTestIntervalMin ignoreras.
+    Resultatet sparas i -LogPath (standard Skrivbordet\netspeed-<datum>-<tid>.csv).
+
 .PARAMETER SpeedTestSec
     Matningstid per riktning (ned/upp) och kort, i sekunder. Standard 8.
 
@@ -92,13 +98,23 @@
     .\Test-WifiConnection.ps1 -AdapterName 'Wi-Fi' -DurationSec 900 -SpikeMs 25 -SpeedTestIntervalMin 0
     Bara Wi-Fi-kortet i 15 minuter, topp-grans 25 ms, inga hastighetstester.
 
+.EXAMPLE
+    .\Test-WifiConnection.ps1 -SpeedTestOnly
+    Hastighetstest ned/upp pa alla aktiva kort, ett i taget, och avsluta (ca 16 s per kort).
+
+.EXAMPLE
+    .\Test-WifiConnection.ps1 -SpeedTestOnly -AdapterName 'Wi-Fi*' -SpeedTestSec 15
+    Bara Wi-Fi-korten, 15 s per riktning.
+
 .NOTES
-    Version : 1.0.0
+    Version : 1.1.0
     Kraver  : Windows PowerShell 5.1 eller PowerShell 7, Windows 8 / Server 2012 eller
               senare. Admin-rattigheter behovs inte. Utgaende HTTPS (443) for
               hastighetstestet.
 
     Changelog
+      1.1.0  2026-11-04  -SpeedTestOnly: bara hastighetstest per kort, en gang, sedan
+                         avslut. Ingen latensmatning.
       1.0.0  2026-11-03  Ombyggd fran forsta versionen:
                          - Alla aktiva NIC testas samtidigt (-AdapterName filtrerar).
                          - Parallell ICMP via IcmpSendEcho2Ex med bunden kalladress
@@ -124,6 +140,7 @@ param(
     [string]$InternetTarget = '8.8.8.8',
     [ValidateRange(0, 60)][int]$RoamWindowSec = 2,
     [ValidateRange(0, 10080)][int]$SpeedTestIntervalMin = 180,
+    [switch]$SpeedTestOnly,
     [ValidateRange(3, 60)][int]$SpeedTestSec = 8,
     [ValidateRange(1, 16)][int]$SpeedTestStreams = 4,
     [string]$SpeedTestHost = 'speed.cloudflare.com',
@@ -561,7 +578,7 @@ function Complete-SpeedTest($Results) {
 }
 
 # ---------- Forberedelser ----------
-if ($TimeoutMs -ge $IntervalMs) {
+if ($TimeoutMs -ge $IntervalMs -and -not $SpeedTestOnly) {
     Write-Host "TimeoutMs ($TimeoutMs) maste vara mindre an IntervalMs ($IntervalMs)." -ForegroundColor Red
     exit 1
 }
@@ -569,12 +586,14 @@ if ($InternetSpikeMs -le 0) { $InternetSpikeMs = 2 * $SpikeMs }
 if (-not $Delimiter) { $Delimiter = (Get-Culture).TextInfo.ListSeparator }
 if (-not $Delimiter) { $Delimiter = ',' }
 $delimChar = $Delimiter[0]
-$speedOn = $SpeedTestIntervalMin -gt 0
+$speedOn = $SpeedTestOnly -or $SpeedTestIntervalMin -gt 0
 
-# Internetmal -> IPv4
+# Internetmal -> IPv4 (behovs inte for bara hastighetstest)
 $inetIP = $null
 $parsed = $null
-if ([System.Net.IPAddress]::TryParse($InternetTarget, [ref]$parsed) -and
+if ($SpeedTestOnly) {
+    $inetIP = '-'
+} elseif ([System.Net.IPAddress]::TryParse($InternetTarget, [ref]$parsed) -and
     $parsed.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
     $inetIP = $parsed.ToString()
 } else {
@@ -638,17 +657,25 @@ $anyWlan = @($nics | Where-Object IsWlan).Count -gt 0
 if (-not $LogPath) {
     $dir = [Environment]::GetFolderPath('Desktop')
     if (-not $dir -or -not (Test-Path -LiteralPath $dir)) { $dir = $env:TEMP }
-    $LogPath = Join-Path $dir ("netconn-{0}.csv" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    $prefix = if ($SpeedTestOnly) { 'netspeed' } else { 'netconn' }
+    $LogPath = Join-Path $dir ("{0}-{1}.csv" -f $prefix, (Get-Date -Format 'yyyyMMdd-HHmmss'))
 }
 $LogPath = [System.IO.Path]::GetFullPath($LogPath)
-$SpeedLogPath = Join-Path ([System.IO.Path]::GetDirectoryName($LogPath)) `
-    ([System.IO.Path]::GetFileNameWithoutExtension($LogPath) + '-hastighet.csv')
+if ($SpeedTestOnly) {
+    $SpeedLogPath = $LogPath
+} else {
+    $SpeedLogPath = Join-Path ([System.IO.Path]::GetDirectoryName($LogPath)) `
+        ([System.IO.Path]::GetFileNameWithoutExtension($LogPath) + '-hastighet.csv')
+}
 $utf8Bom = New-Object System.Text.UTF8Encoding($true)
 
-$writer = New-Object System.IO.StreamWriter($LogPath, $false, $utf8Bom)
-$writer.WriteLine((@('Tid','Matning','Adapter','Typ','KallIP','Gateway','GatewayMs','GatewayStatus',
-    'InternetMs','InternetStatus','Topp','Orsak','UnderLast','SSID','BSSID','Signal','Rssi','Kanal',
-    'Band','RxRate','TxRate','Roaming') -join $Delimiter))
+$writer = $null
+if (-not $SpeedTestOnly) {
+    $writer = New-Object System.IO.StreamWriter($LogPath, $false, $utf8Bom)
+    $writer.WriteLine((@('Tid','Matning','Adapter','Typ','KallIP','Gateway','GatewayMs','GatewayStatus',
+        'InternetMs','InternetStatus','Topp','Orsak','UnderLast','SSID','BSSID','Signal','Rssi','Kanal',
+        'Band','RxRate','TxRate','Roaming') -join $Delimiter))
+}
 $speedWriter = $null
 if ($speedOn) {
     $speedWriter = New-Object System.IO.StreamWriter($SpeedLogPath, $false, $utf8Bom)
@@ -658,13 +685,18 @@ if ($speedOn) {
 
 # Startinfo
 Write-Host ""
-Write-Host "Internetmal: $InternetTarget ($inetIP) | Intervall: $IntervalMs ms | Timeout: $TimeoutMs ms" -ForegroundColor Cyan
-Write-Host "Topp-granser: gateway > $SpikeMs ms, internet > $InternetSpikeMs ms, eller timeout" -ForegroundColor Cyan
-if ($speedOn) {
-    Write-Host ("Hastighetstest: {0}, forst efter 10 s och sedan var {1}:e minut, {2} s ned + {2} s upp per kort, {3} strommar" -f `
-        $SpeedTestHost, $SpeedTestIntervalMin, $SpeedTestSec, $SpeedTestStreams) -ForegroundColor Cyan
+if ($SpeedTestOnly) {
+    Write-Host ("Bara hastighetstest: {0}, {1} s ned + {1} s upp per kort, {2} strommar, korten ett i taget" -f `
+        $SpeedTestHost, $SpeedTestSec, $SpeedTestStreams) -ForegroundColor Cyan
 } else {
-    Write-Host "Hastighetstest: av" -ForegroundColor Cyan
+    Write-Host "Internetmal: $InternetTarget ($inetIP) | Intervall: $IntervalMs ms | Timeout: $TimeoutMs ms" -ForegroundColor Cyan
+    Write-Host "Topp-granser: gateway > $SpikeMs ms, internet > $InternetSpikeMs ms, eller timeout" -ForegroundColor Cyan
+    if ($speedOn) {
+        Write-Host ("Hastighetstest: {0}, forst efter 10 s och sedan var {1}:e minut, {2} s ned + {2} s upp per kort, {3} strommar" -f `
+            $SpeedTestHost, $SpeedTestIntervalMin, $SpeedTestSec, $SpeedTestStreams) -ForegroundColor Cyan
+    } else {
+        Write-Host "Hastighetstest: av" -ForegroundColor Cyan
+    }
 }
 $nics | Format-Table @{n='Kort';e={$_.Name}}, Typ, @{n='Kalla';e={$_.Src}}, @{n='Gateway';e={$_.Gw}},
                      @{n='Lankhastighet';e={$_.Speed}} -AutoSize | Out-Host
@@ -676,7 +708,7 @@ if ($anyWlan) {
         if (-not $w -or -not $w.BSSID) {
             Write-Host "VARNING: hittar inget BSSID for '$($n.Name)' i netsh. Ratt utskrift:" -ForegroundColor Yellow
             $wlanFirst.Raw | Out-Host
-            Write-Host "Skicka den utskriften sa justerar vi falt-namnen. Latensmatningen fortsatter anda." -ForegroundColor Yellow
+            Write-Host "Skicka den utskriften sa justerar vi falt-namnen. Matningen fortsatter anda." -ForegroundColor Yellow
         } else {
             Write-Host ("[{0}] SSID: {1} | BSSID: {2} | Signal: {3}% | Kanal: {4} | Radio: {5}" -f `
                 $n.Name, $w.SSID, $w.BSSID, $w.Signal, $w.Kanal, $w.Radiotyp)
@@ -685,6 +717,53 @@ if ($anyWlan) {
         }
     }
 }
+
+# ---------- Bara hastighetstest (-SpeedTestOnly) ----------
+if ($SpeedTestOnly) {
+    Write-Host ("`nTestar {0} kort, ca {1} s. Resultat till {2}. Avbryt med Ctrl+C.`n" -f `
+        $nics.Count, ($nics.Count * 2 * ($SpeedTestSec + 1)), $SpeedLogPath)
+    $nicSrc = [string[]]@(foreach ($n in $nics) { $n.Src })
+    $speedTask = $null
+    $done = $false
+    try {
+        $speedTask = [SpeedTestV1]::StartAll($nicSrc, $SpeedTestHost, $SpeedTestSec, $SpeedTestStreams)
+        $shown = -1
+        while (-not $speedTask.IsCompleted) {
+            $cur = [SpeedTestV1]::Current
+            if ($cur -ge 0 -and $cur -ne $shown) {
+                Write-Host ("{0}  Testar [{1}] fran {2} ..." -f (Get-Date -Format 'HH:mm:ss'), $nics[$cur].Name,
+                    $nics[$cur].Src) -ForegroundColor DarkCyan
+                $shown = $cur
+            }
+            Start-Sleep -Milliseconds 200
+        }
+        Complete-SpeedTest $speedTask.Result
+        $done = $true
+    } finally {
+        if (-not $done) { [SpeedTestV1]::Cancel() }
+        $speedWriter.Dispose()
+        $state = if ($done) { '' } else { ' - AVBRUTET' }
+        Write-Host ("`n=== Hastighet (Mbit/s){0} ===" -f $state) -ForegroundColor Cyan
+        if ($done) {
+            $nics | ForEach-Object {
+                $r = if ($_.Speeds.Count) { $_.Speeds[0] } else { $null }
+                [pscustomobject]@{
+                    Kort   = $_.Name
+                    Typ    = $_.Typ
+                    Kalla  = $_.Src
+                    Lank   = $_.Speed
+                    Ned    = if ($r) { Format-Mbps $r.DownMbps } else { '-' }
+                    Upp    = if ($r) { Format-Mbps $r.UpMbps } else { '-' }
+                    Signal = if ($_.LastWlan) { $_.LastWlan.Signal } else { '' }
+                    Status = if (-not $r) { '-' } elseif ($r.Error) { $r.Error } else { 'ok' }
+                }
+            } | Format-Table -AutoSize | Out-Host
+        }
+        Write-Host "Sparat: $SpeedLogPath"
+    }
+    return
+}
+
 Write-Host "`nLoggar i $DurationSec s till $LogPath"
 if ($speedOn) { Write-Host "Hastighetstester till $SpeedLogPath" }
 Write-Host "Toppar, roaming och hastighet visas nedan. Avbryt med Ctrl+C (sammanfattningen skrivs anda).`n"
