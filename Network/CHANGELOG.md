@@ -66,7 +66,34 @@ Cloudflare limits seen in testing: HTTP 403 for >= 100 MB per request (script us
 The Wi-Fi fields are verified only against sample `netsh` output - not yet
 against a real wireless adapter.
 
-## Watch-ConnectionQuality.ps1 (repository root)
+## Watch-ConnectionQuality.ps1
+
+### 1.3.0 - 2026-11-10
+
+- **Moved** from the repository root to `Network/` (next to Test-WifiConnection).
+- **`-SpeedTestProvider Cloudflare|Ookla`** (default `Cloudflare`, unchanged). `Ookla`
+  runs the official Speedtest CLI (`speedtest.exe`, `winget install Ookla.Speedtest.CLI`)
+  once per NIC, bound to the NIC with `--ip`, in the background while pings continue.
+  `-OoklaPath` points at the exe (otherwise PATH, the WinGet package folder and the
+  script folder are searched, and the exe must report itself as Ookla's);
+  `-OoklaServerId` pins a server. 120 s timeout per NIC. If Ookla reports a different
+  internal IP than the NIC's, the row is marked ERROR.
+- Speed CSV gets `Provider` and `ResultUrl` columns; `Server` holds the Ookla server.
+- On stop (duration end or Ctrl+C) the paths of the saved files are printed.
+- **Fix: a locked CSV no longer ends the run early.** In 1.2.0 every CSV write used
+  `-ErrorAction Stop`, so opening the live CSV in Excel (which locks it) made the next
+  write fail and the whole run stop long before `-DurationHours`. Rows now wait in
+  memory and are written when the file is free again (warning logged once); if it is
+  still locked at stop they go to `<name>_ej-sparat_<HHmmss>.csv` next to it.
+  Event-log write errors only warn.
+- The wait between samples never runs past the end time. When the duration ends
+  during an Ookla run, only the NIC being tested is finished; the rest are skipped.
+
+Tested: PowerShell parser (0 errors), pure ASCII + BOM. Lock handling run in pwsh 7
+(Linux container, file made read-only mid-run): 22/22 rows kept and duration held
+(0.012 h = 43 s); locked-at-stop case wrote all 9 rows (2 + 7 in the fallback file).
+Ookla JSON fields checked
+against a real run of Speedtest CLI 1.2.0.84 on Linux. **Not yet run on Windows.**
 
 ### 1.2.0 - 2026-11-04
 

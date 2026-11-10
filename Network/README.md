@@ -8,7 +8,7 @@ CSV files that open directly in Excel.
 | Script | Use it when | Measures |
 |---|---|---|
 | [`Test-WifiConnection.ps1`](Test-WifiConnection.ps1) | You need a sharp, per-NIC picture: which adapter spikes, does it follow roaming or weak signal, what speed does each NIC really get | Latency to gateway + internet **per NIC** every second, Wi-Fi SSID/BSSID/signal/channel, speed test per NIC |
-| [`../Watch-ConnectionQuality.ps1`](../Watch-ConnectionQuality.ps1) | You want a light, long-running monitor (hours to days) with an event log of outages | Latency, jitter and loss per target every 10 s, OK/DEGRADED/DOWN events, speed test per NIC |
+| [`Watch-ConnectionQuality.ps1`](Watch-ConnectionQuality.ps1) | You want a light, long-running monitor (hours to days) with an event log of outages | Latency, jitter and loss per target every 10 s, OK/DEGRADED/DOWN events, speed test per NIC |
 
 Changes and test results: [CHANGELOG.md](CHANGELOG.md).
 
@@ -95,6 +95,9 @@ With `-SpeedTestOnly`: `netspeed-<date>-<time>.csv`.
 
 # 3-minute smoke test
 .\Watch-ConnectionQuality.ps1 -DurationHours 0.05 -Verbose
+
+# Speed test with Ookla's Speedtest CLI instead of Cloudflare (winget install Ookla.Speedtest.CLI)
+.\Watch-ConnectionQuality.ps1 -DurationHours 2 -SpeedTestIntervalMin 30 -SpeedTestProvider Ookla
 ```
 
 While a speed test runs, the live view greys out the ping lines and tags them
