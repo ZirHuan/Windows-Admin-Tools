@@ -2,6 +2,12 @@
 
 ## Get-FailedLogonReport
 
+### 1.0.1 - 2026-11-17
+- Performance: 1.0.0 crawled on servers with many 4625 events (array `+=` and a
+  per-event pipeline scan in correlation were both quadratic). Now List[object] +
+  single-pass two-pointer correlation, progress output every 2000 events.
+- New `-MaxEvents` to cap how many of the newest 4625 events are read.
+
 ### 1.0.0 - 2026-11-17
 - Initial release. Summarises Security 4625 failed logons and recovers the source IP
   that 4625 leaves blank for NTLM/NLA logons, using RdpCoreTS/Operational events

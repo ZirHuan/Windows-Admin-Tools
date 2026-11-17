@@ -24,6 +24,8 @@
     How far back to look. Default 24.
 .PARAMETER CorrelateSeconds
     Window before a 4625 in which an RDP 131 connection counts as a candidate. Default 5.
+.PARAMETER MaxEvents
+    Read at most this many newest 4625 events (0 = all in window). Use on huge logs.
 .PARAMETER OutDir
     Output folder. Default C:\Temp\FailedLogonReport-<timestamp>.
 .PARAMETER EnableFirewallLog
@@ -33,7 +35,9 @@
 .EXAMPLE
     .\Get-FailedLogonReport.ps1 -Hours 72 -EnableFirewallLog
 .NOTES
-    Version : 1.0.0
+    Version : 1.0.1
+    1.0.1  Performance: List instead of array +=, single-pass correlation,
+           progress output, -MaxEvents. 1.0.0 crawled on logs with many 4625s.
     1.0.0  Initial release: 4625 parsing, RdpCoreTS 131/140 IP recovery,
            time-based correlation, live 3389/445 sessions, optional firewall logging.
 #>
@@ -41,6 +45,7 @@
 param(
     [int]$Hours = 24,
     [int]$CorrelateSeconds = 5,
+    [int]$MaxEvents = 0,
     [string]$OutDir = ("C:\Temp\FailedLogonReport-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss')),
     [switch]$EnableFirewallLog
 )
@@ -78,13 +83,20 @@ function Get-EventDataMap {
 
 # ---------------------------------------------------------------- 1. 4625
 Write-Host "[1/4] Reading Security 4625 since $start ..." -ForegroundColor Cyan
-$failed = @()
+$failedList = New-Object System.Collections.Generic.List[object]
+$gw = @{ FilterHashtable = @{ LogName = 'Security'; Id = 4625; StartTime = $start }; ErrorAction = 'Stop' }
+if ($MaxEvents -gt 0) { $gw['MaxEvents'] = $MaxEvents }
+$sw = [Diagnostics.Stopwatch]::StartNew()
 try {
-    $ev = Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4625; StartTime = $start } -ErrorAction Stop
+    $ev = @(Get-WinEvent @gw)
 } catch {
     if ($_.Exception.Message -match 'No events were found') { $ev = @() } else { throw }
 }
+Write-Host ("      fetched {0} events in {1:N0} s, parsing ..." -f $ev.Count, $sw.Elapsed.TotalSeconds)
+$i = 0
 foreach ($e in $ev) {
+    $i++
+    if ($i % 2000 -eq 0) { Write-Host ("      parsed {0} / {1}" -f $i, $ev.Count) }
     $m = Get-EventDataMap $e
     $sub = ([string]$m['SubStatus']).ToUpper()
     $st  = ([string]$m['Status']).ToUpper()
@@ -92,7 +104,7 @@ foreach ($e in $ev) {
     if (-not $statusText.ContainsKey($reasonKey)) { $reasonKey = $st }
     $reason = 'Other'
     if ($statusText.ContainsKey($reasonKey)) { $reason = $statusText[$reasonKey] }
-    $failed += New-Object PSObject -Property ([ordered]@{
+    $failedList.Add((New-Object PSObject -Property ([ordered]@{
         Time        = $e.TimeCreated
         User        = $m['TargetUserName']
         Domain      = $m['TargetDomainName']
@@ -107,15 +119,17 @@ foreach ($e in $ev) {
         AuthPkg     = $m['AuthenticationPackageName']
         ProcessName = $m['ProcessName']
         ProbableIP  = ''
-    })
+    })))
 }
-$failed = @($failed | Sort-Object Time)
+$failed = @($failedList | Sort-Object Time)
 Write-Host ("      {0} failed logons" -f $failed.Count)
 
 # ---------------------------------------------------------------- 2. RDP transport log
 Write-Host '[2/4] Reading RdpCoreTS/Operational (131 accepted, 140 bad creds) ...' -ForegroundColor Cyan
 $rdpLog = 'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational'
-$rdpConn = @(); $rdpFail = @(); $rdpNote = ''
+$rdpConnL = New-Object System.Collections.Generic.List[object]
+$rdpFailL = New-Object System.Collections.Generic.List[object]
+$rdpNote = ''
 try {
     $rev = Get-WinEvent -FilterHashtable @{ LogName = $rdpLog; Id = 131, 140; StartTime = $start } -ErrorAction Stop
     foreach ($e in $rev) {
@@ -129,21 +143,33 @@ try {
         $ipOnly = $ip -replace '^\[?([^\]]+?)\]?(:\d+)?$', '$1'
         if ($ip -match '^(\d{1,3}(\.\d{1,3}){3}):\d+$') { $ipOnly = $matches[1] }
         $o = New-Object PSObject -Property ([ordered]@{ Time = $e.TimeCreated; EventId = $e.Id; ClientIP = $ipOnly; Raw = $ip })
-        if ($e.Id -eq 131) { $rdpConn += $o } else { $rdpFail += $o }
+        if ($e.Id -eq 131) { $rdpConnL.Add($o) } else { $rdpFailL.Add($o) }
     }
 } catch {
     if ($_.Exception.Message -match 'No events were found') { $rdpNote = 'RdpCoreTS log present, no 131/140 in window.' }
     else { $rdpNote = "RdpCoreTS log not readable: $($_.Exception.Message)" }
 }
+$rdpConn = @($rdpConnL | Sort-Object Time)
+$rdpFail = @($rdpFailL)
 Write-Host ("      {0} RDP connections accepted, {1} RDP bad-credential events. {2}" -f $rdpConn.Count, $rdpFail.Count, $rdpNote)
 
 # ---------------------------------------------------------------- 3. correlate
 Write-Host "[3/4] Correlating blank-IP 4625 with RDP connects (<= $CorrelateSeconds s before) ..." -ForegroundColor Cyan
-$rdpConn = @($rdpConn | Sort-Object Time)
+# both lists are sorted by time -> one forward-moving pointer, no per-event scan
+$j = 0
+$n = $rdpConn.Count
 foreach ($f in $failed) {
     if ($f.IpAddress -and $f.IpAddress -ne '-') { continue }
     $lo = $f.Time.AddSeconds(-$CorrelateSeconds)
-    $cand = @($rdpConn | Where-Object { $_.Time -ge $lo -and $_.Time -le $f.Time.AddSeconds(1) } | Select-Object -ExpandProperty ClientIP -Unique)
+    $hi = $f.Time.AddSeconds(1)
+    while ($j -lt $n -and $rdpConn[$j].Time -lt $lo) { $j++ }
+    $cand = New-Object System.Collections.Generic.List[string]
+    $k = $j
+    while ($k -lt $n -and $rdpConn[$k].Time -le $hi) {
+        $c = [string]$rdpConn[$k].ClientIP
+        if ($c -and -not $cand.Contains($c)) { $cand.Add($c) }
+        $k++
+    }
     if ($cand.Count -gt 0) { $f.ProbableIP = ($cand -join ';') }
 }
 
