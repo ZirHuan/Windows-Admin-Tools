@@ -2,6 +2,11 @@
 
 ## Get-FailedLogonReport
 
+### 1.0.2 - 2026-11-17
+- Fix: crashed with "The property '#text' cannot be found" on 4625 events that
+  contain empty `<Data/>` fields (StrictMode). EventData now read via
+  namespace-agnostic XPath + InnerText.
+
 ### 1.0.1 - 2026-11-17
 - Performance: 1.0.0 crawled on servers with many 4625 events (array `+=` and a
   per-event pipeline scan in correlation were both quadratic). Now List[object] +

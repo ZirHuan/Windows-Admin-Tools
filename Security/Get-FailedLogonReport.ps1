@@ -35,7 +35,9 @@
 .EXAMPLE
     .\Get-FailedLogonReport.ps1 -Hours 72 -EnableFirewallLog
 .NOTES
-    Version : 1.0.1
+    Version : 1.0.2
+    1.0.2  Fix crash "property '#text' cannot be found" on events with empty
+           <Data/> fields (StrictMode); EventData read via namespace-agnostic XPath.
     1.0.1  Performance: List instead of array +=, single-pass correlation,
            progress output, -MaxEvents. 1.0.0 crawled on logs with many 4625s.
     1.0.0  Initial release: 4625 parsing, RdpCoreTS 131/140 IP recovery,
@@ -77,7 +79,11 @@ function Get-EventDataMap {
     param($Event)
     $map = @{}
     $xml = [xml]$Event.ToXml()
-    foreach ($d in $xml.Event.EventData.Data) { $map[[string]$d.Name] = [string]$d.'#text' }
+    # namespace-agnostic, and InnerText is '' for empty <Data/> (".'#text'" throws under StrictMode)
+    foreach ($d in $xml.SelectNodes("//*[local-name()='EventData']/*[local-name()='Data']")) {
+        $n = $d.GetAttribute('Name')
+        if ($n) { $map[$n] = $d.InnerText }
+    }
     return $map
 }
 
