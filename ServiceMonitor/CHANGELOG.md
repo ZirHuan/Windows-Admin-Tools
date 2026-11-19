@@ -3,7 +3,7 @@
 All notable changes to ServiceMonitor.ps1 are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versioning follows [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [1.4.0] - 2026-09-28
 
 ### Fixed
 - **`tests/Test-ServiceMonitor.ps1`: repaired the suite against the v1.3.0 config
@@ -39,6 +39,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versioning follo
     event every 5 minutes. Now asserts the warning text and exit `0`.
 
 ### Changed
+- **Second mail group renamed to `support` ("Support Team").** The previous
+  customer-specific group key `iver` is still accepted everywhere: `ServiceMonitor.ps1`
+  reads `groups.support` or falls back to `groups.iver`, and treats `alerts: "iver"` as
+  `support`. `monitor_web.py` migrates an old `monitor-config.json` in place the first
+  time it reads it (renames the group, relabels "Iver Support", rewrites service
+  routing). No manual action is needed on existing installs.
+- **No hard-coded relay or sender any more (breaking for installs without smtp.json).**
+  `-SmtpServer` has no default: when no server is configured the monitor still detects
+  and restarts services, but logs alerts as NOT sent (ERROR) instead of mailing a
+  guessed relay, and warns at startup. `-FromAddress` defaults to
+  `servicemonitor@<computer DNS domain>`. Installs configured through the web UI or
+  `New-CredStore.ps1` already have both in `smtp.json` and are unaffected.
+- Sample `recipients.txt`, `monitor-config.json`, runbook and design mock-ups now use
+  placeholder names and `example.com` / documentation-range addresses only.
+- `monitor_web.py`, `New-CredStore.ps1`, `install-monitor-web.ps1`: version 1.4.0.
+- Missing mail settings are logged as INFO (not WARNING) under `-NoEmail`, where no mail
+  is sent anyway; real runs still warn.
+- `tests/Test-ServiceMonitor.ps1` uses `EventLog` as its always-running service instead of
+  Print Spooler, which is absent on Server Core and often disabled as PrintNightmare
+  hardening. Suite: 24/24 on Server 2022 Core, Windows PowerShell 5.1, Pester 5.7.1.
 - **`tests/Test-ServiceMonitor.ps1`: tightened the services-file-not-found assertion**
   from `not found` to `Services file not found`. The loose form also matched the
   benign `monitor-config.json not found` fallback warning that legacy mode always
@@ -164,7 +184,7 @@ folded in below.
   longer get every alert twice, including across the merged 'both' group.
 - **`ServiceMonitor.ps1`: alert bodies no longer leak cross-group addresses.**
   The embedded log tail filtered out `Alert sent to:` lines, which listed the
-  OTHER group's recipient addresses in dev-only/iver-only alerts.
+  OTHER group's recipient addresses in dev-only/support-only alerts.
 - **`ServiceMonitor.ps1`: log writability probe no longer appends a blank line
   every run** (288 blank lines/day); uses a zero-length .NET append instead.
 - **`ServiceMonitor.ps1`: `sc.exe` output capture** moved under
@@ -375,16 +395,16 @@ folded in below.
   web app as a Windows service via NSSM, places a desktop shortcut for all RDP users. Includes
   automatic migration of existing services.txt + recipients.txt into monitor-config.json.
 - `monitor-config.json`: unified config format replacing services.txt + recipients.txt. Combines
-  services (with per-service alert routing) and two mail groups (dev + iver).
+  services (with per-service alert routing) and two mail groups (dev + support).
 
 ### Changed
 - `ServiceMonitor.ps1` v1.2.0: reads `monitor-config.json` when present (JSON mode). Each service
-  entry carries an `alerts` field: `both` | `dev` | `iver` | `none` — controls which mail group
+  entry carries an `alerts` field: `both` | `dev` | `support` | `none` — controls which mail group
   receives alerts for that service. `none` fully suppresses alerts for that service. Legacy
   services.txt + recipients.txt fallback preserved for backward compatibility when the JSON file
   is absent. `Build-AlertBody` now includes `Sent to: <group>` line so recipients know why they
   received the alert.
-- Alert emails now show which group the alert was routed to (Dev Team only / Iver Support only /
+- Alert emails now show which group the alert was routed to (Dev Team only / Support Team only /
   Both groups) in the email body.
 
 ## [1.1.0] - 2026-06-26

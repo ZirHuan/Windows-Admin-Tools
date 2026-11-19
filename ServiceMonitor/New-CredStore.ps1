@@ -36,11 +36,34 @@
 .PARAMETER Force
     Overwrite existing credential files without prompting.
 
+.PARAMETER PasswordFromStdin
+    Non-interactive mode. Reads exactly ONE line from standard input and uses it
+    as the SMTP password. Nothing is prompted for: -SmtpUser, -SmtpServer and
+    -FromAddress become mandatory, -SmtpPort keeps its default if not given, and
+    an unspecified -SmtpUseSsl means SSL off. -Force is required if any of the
+    output files already exist.
+
+    Intended for the ServiceMonitor web admin UI, which pipes the password in on
+    stdin so it never appears in a command line (a -Password string parameter
+    would be readable by any user running Get-CimInstance Win32_Process).
+
+    The interactive flow is unchanged when this switch is absent.
+
+.PARAMETER Preset
+    Optional relay-preset id recorded in smtp.json as the 'preset' key, so the
+    web UI can re-select the same preset later. Purely informational -
+    ServiceMonitor.ps1 ignores it. Omit it and no 'preset' key is written.
+
 .EXAMPLE
     .\New-CredStore.ps1
 
 .EXAMPLE
     .\New-CredStore.ps1 -SmtpUser relay@example.com -OutputFolder C:\Monitoring\creds
+
+.EXAMPLE
+    'p@ssw0rd' | .\New-CredStore.ps1 -PasswordFromStdin -Force `
+        -SmtpUser alerts@contoso.com -SmtpServer smtp.office365.com `
+        -SmtpPort 587 -FromAddress alerts@contoso.com -SmtpUseSsl
 
 .NOTES
     The AES key is generated with RandomNumberGenerator (cryptographically secure).
@@ -49,7 +72,7 @@
     share the same .key file).
     Requires elevation: the smtp.key ACL restriction (SYSTEM + Administrators)
     and the usual C:\ServiceMonitor target folder both need admin rights.
-    Version: 1.3.0
+    Version: 1.4.0
 #>
 
 [CmdletBinding()]
@@ -60,7 +83,9 @@ param(
     [int]    $SmtpPort     = 587,
     [string] $FromAddress  = '',
     [switch] $SmtpUseSsl,
-    [switch] $Force
+    [switch] $Force,
+    [switch] $PasswordFromStdin,
+    [string] $Preset       = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -78,10 +103,14 @@ $credFile = Join-Path $OutputFolder 'smtp.cred'
 $userFile = Join-Path $OutputFolder 'smtp.user'
 $jsonFile = Join-Path $OutputFolder 'smtp.json'
 
-# Guard against accidental overwrite
+# Guard against accidental overwrite. In -PasswordFromStdin mode there is nobody
+# to answer a prompt, so an existing file is a hard error unless -Force was given.
 if (-not $Force) {
     foreach ($f in @($keyFile, $credFile, $userFile, $jsonFile)) {
         if (Test-Path -LiteralPath $f) {
+            if ($PasswordFromStdin) {
+                throw "File exists: $f - pass -Force to overwrite (non-interactive mode cannot prompt)."
+            }
             $answer = Read-Host "File exists: $f  Overwrite? [y/N]"
             if ($answer -notmatch '^[Yy]') {
                 Write-Host 'Aborted.' -ForegroundColor Yellow
@@ -95,21 +124,22 @@ if (-not (Test-Path -LiteralPath $OutputFolder)) {
     New-Item -ItemType Directory -Path $OutputFolder | Out-Null
 }
 
-# Collect inputs
-if (-not $SmtpUser) {
+# Collect inputs. Every Read-Host below is skipped in -PasswordFromStdin mode -
+# the caller must supply the value as a parameter or the script throws.
+if (-not $SmtpUser -and -not $PasswordFromStdin) {
     $SmtpUser = Read-Host 'SMTP username'
 }
 if (-not $SmtpUser) {
-    throw 'SMTP username cannot be empty.'
+    throw 'SMTP username cannot be empty - pass -SmtpUser.'
 }
 
 # SMTP server differs per deployment, so capture it here and store it alongside
 # the credential (in smtp.json) rather than relying on a script default.
-if (-not $SmtpServer) {
+if (-not $SmtpServer -and -not $PasswordFromStdin) {
     $SmtpServer = Read-Host 'SMTP server (hostname or IP, WITHOUT port)'
 }
 if (-not $SmtpServer) {
-    throw 'SMTP server cannot be empty.'
+    throw 'SMTP server cannot be empty - pass -SmtpServer.'
 }
 # host:port is a classic paste mistake - the whole string would be treated as a
 # hostname by SmtpClient and DNS resolution would fail. Port goes in SmtpPort.
@@ -121,7 +151,7 @@ if ($SmtpServer -match ':') {
 # cost a real deployment hours: mail either never connected or was accepted by
 # the relay and then dropped because the From domain was not authorized.
 # Prompt for all three unless given on the command line.
-if (-not $PSBoundParameters.ContainsKey('SmtpPort')) {
+if (-not $PSBoundParameters.ContainsKey('SmtpPort') -and -not $PasswordFromStdin) {
     $portAnswer = Read-Host "SMTP port [$SmtpPort]"
     if ($portAnswer) {
         # Validate before casting: '[int]' on junk throws an unfriendly parse
@@ -132,39 +162,60 @@ if (-not $PSBoundParameters.ContainsKey('SmtpPort')) {
         $SmtpPort = [int]$portAnswer
     }
 }
-if (-not $PSBoundParameters.ContainsKey('SmtpUseSsl')) {
+# In -PasswordFromStdin mode an unspecified -SmtpUseSsl deliberately means OFF,
+# so an anonymous port-25 relay can be configured without any extra flag.
+if (-not $PSBoundParameters.ContainsKey('SmtpUseSsl') -and -not $PasswordFromStdin) {
     $sslAnswer = Read-Host 'Use SSL/STARTTLS? (required on port 587) [Y/n]'
     $SmtpUseSsl = [switch]($sslAnswer -notmatch '^[Nn]')
 }
-if (-not $FromAddress) {
+if (-not $FromAddress -and -not $PasswordFromStdin) {
     $FromAddress = Read-Host 'From address (MUST be on a domain the relay accepts mail for)'
 }
 if (-not $FromAddress) {
-    throw 'From address cannot be empty - the relay silently drops mail from unauthorized senders.'
+    throw 'From address cannot be empty - the relay silently drops mail from unauthorized senders. Pass -FromAddress.'
+}
+# -SmtpPort given on the command line skips the prompt's range check above, and
+# a bad port would be written to smtp.json unchallenged. Validate it either way.
+if ($SmtpPort -lt 1 -or $SmtpPort -gt 65535) {
+    throw "Invalid SMTP port '$SmtpPort' - must be 1-65535 (587 for STARTTLS relay, 25 for anonymous)."
 }
 
-$secPwd    = Read-Host 'SMTP password' -AsSecureString
-$secPwdCfm = Read-Host 'Confirm password' -AsSecureString
-
-# Compare passwords. Convert to plaintext only for the comparison, and always
-# free the unmanaged BSTR buffers (ZeroFreeBSTR zeroes them first). Honest
-# caveat: PtrToStringBSTR still copies the password into managed strings that
-# live until garbage-collected - full scrubbing is not possible in .NET; this
-# just minimizes the exposure window.
-$bstr1 = [IntPtr]::Zero
-$bstr2 = [IntPtr]::Zero
-try {
-    $bstr1  = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secPwd)
-    $bstr2  = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secPwdCfm)
-    $plain1 = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr1)
-    $plain2 = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr2)
-    if ($plain1 -ne $plain2) {
-        throw 'Passwords do not match. Re-run New-CredStore.ps1.'
+if ($PasswordFromStdin) {
+    # One line from stdin. Never echoed, never logged, never on a command line.
+    # Built into a SecureString a character at a time so the password does not
+    # exist as a managed String beyond the line the console hands us.
+    $stdinLine = [Console]::In.ReadLine()
+    if ($null -eq $stdinLine -or $stdinLine.Length -eq 0) {
+        throw 'No password received on stdin - pipe exactly one line when using -PasswordFromStdin.'
     }
-} finally {
-    if ($bstr1 -ne [IntPtr]::Zero) { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr1) }
-    if ($bstr2 -ne [IntPtr]::Zero) { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr2) }
-    $plain1 = $null; $plain2 = $null
+    $secPwd = New-Object System.Security.SecureString
+    foreach ($ch in $stdinLine.ToCharArray()) { $secPwd.AppendChar($ch) }
+    $secPwd.MakeReadOnly()
+    $stdinLine = $null
+} else {
+    $secPwd    = Read-Host 'SMTP password' -AsSecureString
+    $secPwdCfm = Read-Host 'Confirm password' -AsSecureString
+
+    # Compare passwords. Convert to plaintext only for the comparison, and always
+    # free the unmanaged BSTR buffers (ZeroFreeBSTR zeroes them first). Honest
+    # caveat: PtrToStringBSTR still copies the password into managed strings that
+    # live until garbage-collected - full scrubbing is not possible in .NET; this
+    # just minimizes the exposure window.
+    $bstr1 = [IntPtr]::Zero
+    $bstr2 = [IntPtr]::Zero
+    try {
+        $bstr1  = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secPwd)
+        $bstr2  = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secPwdCfm)
+        $plain1 = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr1)
+        $plain2 = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr2)
+        if ($plain1 -ne $plain2) {
+            throw 'Passwords do not match. Re-run New-CredStore.ps1.'
+        }
+    } finally {
+        if ($bstr1 -ne [IntPtr]::Zero) { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr1) }
+        if ($bstr2 -ne [IntPtr]::Zero) { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr2) }
+        $plain1 = $null; $plain2 = $null
+    }
 }
 
 # Generate AES-256 key (32 bytes). RandomNumberGenerator::Create() is the
@@ -193,6 +244,9 @@ $smtpSettings = [ordered]@{
     user   = $SmtpUser
     useSsl = [bool]$SmtpUseSsl
 }
+# Only written when asked for, so the file keeps its historical five-key shape
+# for anyone who does not use the web UI. ServiceMonitor.ps1 ignores this key.
+if ($Preset) { $smtpSettings['preset'] = $Preset }
 $json = $smtpSettings | ConvertTo-Json
 [System.IO.File]::WriteAllText($jsonFile, $json, (New-Object System.Text.UTF8Encoding($false)))
 
