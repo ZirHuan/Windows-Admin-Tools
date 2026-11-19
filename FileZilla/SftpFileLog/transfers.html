@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SFTP File Transfers</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #667085;
+    --line: #e3e6eb; --accent: #2457c5; --head: #eef1f5; --hover: #f3f6fc;
+    --up: #1a7f37; --down: #2457c5; --del: #b54708; --fail: #c4320a; --ren: #6941c6;
+    --failbg: #fff1ec; --warnbg: #fff6d6; --warntext: #7a4b00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1a1e26; --text: #e4e7ec; --muted: #98a2b3;
+      --line: #2b313c; --accent: #7aa2f7; --head: #212631; --hover: #222836;
+      --up: #4ac26b; --down: #7aa2f7; --del: #f79009; --fail: #ff6b4a; --ren: #a78bfa;
+      --failbg: #3a1f1a; --warnbg: #3a2f12; --warntext: #ffd27a;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.4 "Segoe UI", system-ui, sans-serif; }
+  header { padding: 14px 20px 6px; }
+  h1 { font-size: 18px; margin: 0; }
+  .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .sub.stale { color: var(--warntext); background: var(--warnbg); display: inline-block;
+               padding: 2px 6px; border-radius: 4px; }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: end;
+         padding: 10px 20px; position: sticky; top: 0; background: var(--bg);
+         border-bottom: 1px solid var(--line); z-index: 2; }
+  .bar label { display: flex; flex-direction: column; font-size: 11px; color: var(--muted); gap: 2px; }
+  .bar label.chk { flex-direction: row; align-items: center; gap: 5px; font-size: 13px;
+                   color: var(--text); padding-bottom: 7px; }
+  input, select, button { font: inherit; color: var(--text); background: var(--panel);
+         border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+  input[type=checkbox] { padding: 0; }
+  #q { width: 300px; max-width: 80vw; }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  .count { margin-left: auto; color: var(--muted); font-size: 12px; align-self: center; }
+  main { padding: 0 20px 20px; }
+  table { width: 100%; border-collapse: collapse; background: var(--panel);
+          border: 1px solid var(--line); margin-top: 10px; }
+  th, td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: left;
+           white-space: nowrap; }
+  td.file, td.folder, td.old, td.err { white-space: normal; word-break: break-all; }
+  td.old, td.err { color: var(--muted); font-size: 12px; }
+  tr.failed td { background: var(--failbg); }
+  tr.failed td.err { color: var(--fail); }
+  th { background: var(--head); cursor: pointer; user-select: none; font-weight: 600;
+       position: sticky; top: var(--bar-h, 58px); z-index: 1; }
+  th .arr { color: var(--muted); font-size: 10px; }
+  tr:hover td { background: var(--hover); }
+  td.id, td.user, td.ip { cursor: pointer; }
+  td.id:hover, td.user:hover, td.ip:hover { text-decoration: underline; color: var(--accent); }
+  .a-Upload { color: var(--up); font-weight: 600; }
+  .a-Download { color: var(--down); font-weight: 600; }
+  .a-Delete { color: var(--del); font-weight: 600; }
+  .a-Rename, .a-CreateDir { color: var(--ren); font-weight: 600; }
+  .a-UploadFailed, .a-DownloadFailed, .a-DeleteFailed, .a-OpenFailed { color: var(--fail); font-weight: 700; }
+  mark { background: #ffe58a; color: #000; border-radius: 2px; }
+  .empty { padding: 40px; text-align: center; color: var(--muted); }
+  #more { margin: 12px auto; display: block; }
+  @media (max-width: 700px) { .bar, header, main { padding-left: 16px; padding-right: 16px; } th { top: 0; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>SFTP File Transfers</h1>
+  <div class="sub" id="status">Loading...</div>
+</header>
+
+<div class="bar">
+  <label>Search (all columns, several words = AND)
+    <input id="q" type="search" placeholder="e.g. alice invoice_1026" autofocus></label>
+  <label>User <select id="user"><option value="">All users</option></select></label>
+  <label>Action <select id="action"><option value="">All actions</option></select></label>
+  <label>From <input id="from" type="date"></label>
+  <label>To <input id="to" type="date"></label>
+  <label class="chk"><input id="failed" type="checkbox"> Failures only</label>
+  <label class="chk" title="Re-read transfers-data.js every 5 minutes, keeping the filters"><input id="auto" type="checkbox" checked> Auto-refresh</label>
+  <button id="clear" type="button">Clear</button>
+  <button id="export" type="button">Export result (CSV)</button>
+  <button id="opendir" type="button" title="Pick an output folder (e.g. another server's SFTPfiletransfers) - reads transfers-data.js or the transfers.*.csv files in it">Open folder...</button>
+  <button id="load" type="button" title="Pick transfers-data.js and/or transfers.*.csv files">Open file...</button>
+  <input id="picker" type="file" accept=".js,.csv" multiple hidden>
+  <input id="dirpicker" type="file" webkitdirectory multiple hidden>
+  <span class="count" id="count"></span>
+</div>
+
+<main>
+  <table id="tbl">
+    <thead><tr id="headrow"></tr></thead>
+    <tbody id="body"></tbody>
+  </table>
+  <div class="empty" id="empty" hidden></div>
+  <button id="more" type="button" hidden></button>
+</main>
+
+<script>
+(function () {
+  "use strict";
+  var PAGE = 1000, REFRESH_MS = 5 * 60 * 1000, STALE_MIN = 15;
+  // Column order of a row; CSVs are mapped onto it by header name
+  var COLS = ["Date", "Time", "ID", "User", "IP", "Folder", "File", "Action", "OldName", "Error"];
+  var LABEL = { OldName: "Old name" };
+  var CLS = { ID: "id", User: "user", IP: "ip", Folder: "folder", File: "file", OldName: "old", Error: "err" };
+  var C = {}; COLS.forEach(function (c, i) { C[c] = i; });
+  var HAY = COLS.length;              // index of the lower-case search text
+
+  var rows = [], view = [], shown = 0, generated = null, manual = false;
+  var sortKey = C.Date, sortDir = -1;   // newest first
+
+  var $ = function (id) { return document.getElementById(id); };
+  // Older browsers (Internet Explorer 11, the default on Windows Server 2016/2019)
+  // lack closest() / remove() / NodeList.forEach - use plain DOM instead.
+  function up(el, tag) { while (el && el.nodeName !== tag) el = el.parentNode; return el; }
+  function drop(el) { if (el && el.parentNode) el.parentNode.removeChild(el); }
+  // Show script errors on the page instead of leaving an empty table
+  window.onerror = function (msg, src, line) {
+    var el = $("status");
+    if (el) { el.textContent = "Page error: " + msg + " (line " + line + "). Try Microsoft Edge or Chrome."; el.className = "sub stale"; }
+  };
+
+  // Keep the sticky table header just below the (possibly wrapping) filter bar
+  function barHeight() { document.documentElement.style.setProperty("--bar-h", document.querySelector(".bar").offsetHeight + "px"); }
+  if (window.ResizeObserver) new ResizeObserver(barHeight).observe(document.querySelector(".bar"));
+  else window.addEventListener("resize", barHeight);
+  barHeight();
+
+  $("headrow").innerHTML = COLS.map(function (c, i) {
+    return '<th data-k="' + i + '">' + (LABEL[c] || c) + ' <span class="arr"></span></th>';
+  }).join("");
+
+  // ';'-separated, "quoted" CSV (as written by Export-SftpFileLog.ps1)
+  function parseCsv(text) {
+    var out = [], row = [], f = "", q = false, i = 0, c;
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    for (; i < text.length; i++) {
+      c = text[i];
+      if (q) {
+        if (c === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; }
+        else f += c;
+      } else if (c === '"') q = true;
+      else if (c === ";") { row.push(f); f = ""; }
+      else if (c === "\n") { row.push(f); out.push(row); row = []; f = ""; }
+      else if (c !== "\r") f += c;
+    }
+    if (f !== "" || row.length) { row.push(f); out.push(row); }
+    return out;
+  }
+
+  // Works for the current 10-column files and the older 7-column ones
+  function addCsv(text, into) {
+    var r = parseCsv(text), map, i, j;
+    if (!r.length) return;
+    map = COLS.map(function (c) { return r[0].indexOf(c); });
+    if (map[C.Date] < 0 || map[C.Action] < 0) return;
+    for (i = 1; i < r.length; i++) {
+      if (r[i].length < 2) continue;
+      var x = [];
+      for (j = 0; j < COLS.length; j++) x.push(map[j] >= 0 && r[i][map[j]] != null ? r[i][map[j]] : "");
+      x.push(x.join(" ").toLowerCase());
+      into.push(x);
+    }
+  }
+
+  function dedupe(list) {
+    var seen = {}, out = [];
+    list.forEach(function (r) { var k = r.slice(0, HAY).join("\u0001"); if (!seen[k]) { seen[k] = 1; out.push(r); } });
+    return out;
+  }
+
+  function fillSelect(sel, idx) {
+    var cur = sel.value, vals = {};
+    rows.forEach(function (r) { vals[r[idx]] = 1; });
+    if (cur) vals[cur] = 1;
+    while (sel.options.length > 1) sel.remove(1);
+    Object.keys(vals).sort(function (a, b) { return a.toLowerCase() < b.toLowerCase() ? -1 : 1; })
+      .forEach(function (v) { sel.add(new Option(v, v)); });
+    sel.value = cur;
+  }
+
+  function status() {
+    var days = {}, d, el = $("status"), txt, age = null;
+    rows.forEach(function (r) { days[r[C.Date]] = 1; });
+    d = Object.keys(days).sort();
+    if (!rows.length) {
+      txt = manual ? "No transfers in the loaded files."
+                   : "No transfers loaded. Run Export-SftpFileLog.ps1, or use 'Open folder...'.";
+    } else {
+      txt = rows.length.toLocaleString() + " transfers, " + d.length + " day(s): " + d[0] + " to " + d[d.length - 1];
+      if (manual) txt += "  -  opened by hand: " + manual + "  (no auto-refresh; reload the page to go back)";
+      else if (generated) {
+        age = (Date.now() - new Date(generated.replace(" ", "T")).getTime()) / 60000;
+        txt += "  -  data generated " + generated;
+        if (age > STALE_MIN) txt += "  (" + Math.round(age) + " min ago - is the scheduled task running?)";
+      }
+    }
+    el.textContent = txt;
+    el.className = "sub" + (age !== null && age > STALE_MIN ? " stale" : "");
+  }
+
+  function afterLoad() {
+    rows = dedupe(rows);
+    fillSelect($("user"), C.User);
+    fillSelect($("action"), C.Action);
+    status();
+    apply(true);
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function hl(s, words) {
+    var h = esc(s);
+    if (!words.length || !s) return h;
+    var re = new RegExp("(" + words.map(function (w) { return esc(w).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }).join("|") + ")", "gi");
+    return h.replace(re, "<mark>$1</mark>");
+  }
+
+  function words() { return $("q").value.toLowerCase().split(/\s+/).filter(Boolean); }
+  function isFail(r) { return /Failed$/.test(r[C.Action]); }
+
+  function apply(keepScroll) {
+    var w = words(), u = $("user").value, a = $("action").value,
+        from = $("from").value, to = $("to").value, fo = $("failed").checked,
+        y = window.scrollY, n = Math.max(shown, PAGE);
+    view = rows.filter(function (r) {
+      if (u && r[C.User] !== u) return false;
+      if (a && r[C.Action] !== a) return false;
+      if (fo && !isFail(r)) return false;
+      if (from && r[C.Date] < from) return false;
+      if (to && r[C.Date] > to) return false;
+      for (var i = 0; i < w.length; i++) if (r[HAY].indexOf(w[i]) < 0) return false;
+      return true;
+    });
+    var k = sortKey, d = sortDir;
+    view.sort(function (x, y) {
+      var p = x[k], q = y[k];
+      if (k === C.ID) { p = +p; q = +q; }
+      if (p < q) return -d; if (p > q) return d;
+      var t = (x[C.Date] + x[C.Time]).localeCompare(y[C.Date] + y[C.Time]);   // tie-break on date+time
+      return sortDir === -1 ? -t : t;
+    });
+    Array.prototype.forEach.call(document.querySelectorAll("th"), function (th) {
+      th.querySelector(".arr").textContent = +th.dataset.k === sortKey ? (sortDir === 1 ? "▲" : "▼") : "";
+    });
+    $("body").innerHTML = "";
+    shown = 0;
+    render(keepScroll === true ? n : PAGE);
+    if (keepScroll === true) window.scrollTo(0, y);
+    saveState();
+  }
+
+  function render(n) {
+    var w = words(), html = [], end = Math.min(view.length, shown + (n || PAGE)), r;
+    for (var i = shown; i < end; i++) {
+      r = view[i];
+      html.push("<tr" + (isFail(r) ? ' class="failed"' : "") + ">" + COLS.map(function (c, j) {
+        if (c === "Action") return '<td class="a-' + esc(r[j]) + '">' + esc(r[j]) + "</td>";
+        var cls = CLS[c] ? ' class="' + CLS[c] + '"' : "";
+        var tip = c === "ID" ? ' title="Show this session"' : c === "User" ? ' title="Filter on this user"'
+                : c === "IP" ? ' title="Search this IP"' : "";
+        return "<td" + cls + tip + ">" + (j <= C.Time ? esc(r[j]) : hl(r[j], w)) + "</td>";
+      }).join("") + "</tr>");
+    }
+    $("body").insertAdjacentHTML("beforeend", html.join(""));
+    shown = end;
+    $("count").textContent = view.length.toLocaleString() + " of " + rows.length.toLocaleString() + " rows";
+    $("empty").hidden = view.length > 0;
+    $("empty").textContent = rows.length ? "No rows match the filter." : "No data loaded.";
+    $("more").hidden = shown >= view.length;
+    $("more").textContent = "Show " + Math.min(PAGE, view.length - shown).toLocaleString() + " more (" + (view.length - shown).toLocaleString() + " left)";
+  }
+
+  // --- filters survive a page reload (kept in the URL #hash) ---------------
+  function saveState() {
+    var s = { q: $("q").value, u: $("user").value, a: $("action").value, f: $("from").value,
+              t: $("to").value, x: $("failed").checked ? 1 : 0, r: $("auto").checked ? 1 : 0,
+              k: sortKey, d: sortDir };
+    try { history.replaceState(null, "", "#" + encodeURIComponent(JSON.stringify(s))); } catch (e) { /* file:// may refuse */ }
+  }
+  function loadState() {
+    var s;
+    try { s = JSON.parse(decodeURIComponent(location.hash.slice(1))); } catch (e) { return; }
+    if (!s) return;
+    $("q").value = s.q || ""; $("from").value = s.f || ""; $("to").value = s.t || "";
+    $("failed").checked = !!s.x; $("auto").checked = s.r !== 0;
+    if (s.u) { $("user").add(new Option(s.u, s.u)); $("user").value = s.u; }
+    if (s.a) { $("action").add(new Option(s.a, s.a)); $("action").value = s.a; }
+    if (typeof s.k === "number" && s.k >= 0 && s.k < COLS.length) sortKey = s.k;
+    if (s.d === 1 || s.d === -1) sortDir = s.d;
+  }
+
+  // --- data from transfers-data.js (re-read for auto-refresh) --------------
+  // Where to look for the data: next to this page (normal), or in the
+  // SFTPfiletransfers subfolder when the page is opened from the script folder.
+  // Each place is tried with and without a cache-busting ?t= (some setups refuse
+  // a query string on file:// links).
+  var DATA_PLACES = ["transfers-data.js", "SFTPfiletransfers/transfers-data.js"];
+  var dataSrc = null;                  // the variant that worked last time
+
+  function loadData(first) {
+    var tries = [];
+    if (dataSrc) tries.push(dataSrc);
+    DATA_PLACES.forEach(function (p) { tries.push({ path: p, bust: true }, { path: p, bust: false }); });
+    var i = 0;
+    (function next() {
+      if (i >= tries.length) {
+        if (first || !rows.length) {
+          rows = []; afterLoad();
+          var base = location.href.replace(/[?#].*$/, "").replace(/[^\/]*$/, "");
+          $("status").textContent = "Could not load the transfer data. Looked for " +
+            DATA_PLACES.map(function (p) { return decodeURIComponent(base + p).replace(/^file:\/+/, ""); }).join("  and  ") +
+            ". Open the transfers.html that sits in the SFTPfiletransfers folder, run Export-SftpFileLog.ps1, or pick the folder with 'Open folder...'.";
+          $("status").className = "sub stale";
+        } else status();
+        return;
+      }
+      var t = tries[i++], s = document.createElement("script");
+      drop($("datajs"));
+      window.SFTP_DAYS = undefined;
+      s.id = "datajs";
+      s.src = t.path + (t.bust ? "?t=" + Date.now() : "");
+      s.onload = function () {
+        if (!window.SFTP_DAYS) { next(); return; }
+        dataSrc = t;
+        var list = [];
+        window.SFTP_DAYS.forEach(function (x) { addCsv(x, list); });
+        generated = window.SFTP_GENERATED || null;
+        manual = false;
+        rows = list;
+        afterLoad();
+      };
+      s.onerror = next;
+      document.body.appendChild(s);
+    })();
+  }
+
+  var timer;
+  $("q").addEventListener("input", function () { clearTimeout(timer); timer = setTimeout(apply, 150); });
+  ["user", "action", "from", "to", "failed"].forEach(function (id) { $(id).addEventListener("change", apply); });
+  $("auto").addEventListener("change", saveState);
+  $("more").addEventListener("click", function () { render(PAGE); });
+  $("clear").addEventListener("click", function () {
+    $("q").value = ""; $("user").value = ""; $("action").value = ""; $("from").value = ""; $("to").value = "";
+    $("failed").checked = false;
+    apply();
+  });
+  document.querySelector("thead").addEventListener("click", function (e) {
+    var th = up(e.target, "TH"); if (!th) return;
+    var k = +th.dataset.k;
+    if (k === sortKey) sortDir = -sortDir; else { sortKey = k; sortDir = k <= C.ID ? -1 : 1; }
+    apply();
+  });
+  $("body").addEventListener("click", function (e) {
+    var td = up(e.target, "TD"); if (!td) return;
+    if (td.classList.contains("user")) { $("user").value = td.textContent; apply(); }
+    if (td.classList.contains("id") || td.classList.contains("ip")) { $("q").value = td.textContent; apply(); }
+  });
+
+  $("export").addEventListener("click", function () {
+    var q = function (s) { return '"' + String(s).replace(/"/g, '""') + '"'; };
+    var lines = [COLS.map(q).join(";")].concat(
+      view.map(function (r) { return r.slice(0, HAY).map(q).join(";"); }));
+    var blob = new Blob(["﻿" + lines.join("\r\n") + "\r\n"], { type: "text/csv;charset=utf-8" });
+    if (navigator.msSaveBlob) { navigator.msSaveBlob(blob, "transfers-filtered.csv"); return; }
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "transfers-filtered.csv";
+    document.body.appendChild(a); a.click(); drop(a);
+  });
+
+  // transfers-data.js written by Export-SftpFileLog.ps1, read as DATA (never executed):
+  //   window.SFTP_DAYS.push("<csv text as JSON string>");
+  //   window.SFTP_GENERATED = "yyyy-MM-dd HH:mm";
+  function addDataJs(text, list) {
+    var lines = text.split(/\r?\n/), m, gen = null, n = 0;
+    for (var i = 0; i < lines.length; i++) {
+      if ((m = /^window\.SFTP_DAYS\.push\((".*")\);\s*$/.exec(lines[i]))) { addCsv(JSON.parse(m[1]), list); n++; }
+      else if ((m = /^window\.SFTP_GENERATED = (".*");\s*$/.exec(lines[i]))) gen = JSON.parse(m[1]);
+    }
+    if (!n) throw new Error("not a transfers-data.js file");
+    return gen;
+  }
+
+  // files: File objects; label: what to show in the status line
+  function openFiles(files, label, fromDir) {
+    var isData = function (f) { return /\.js$/i.test(f.name); };
+    // From a folder only the daily transfers.YYYY-MM-DD.csv files; picked by hand, any .csv
+    var isCsv = function (f) { return fromDir ? /^transfers\.\d{4}-\d\d-\d\d\.csv$/i.test(f.name) : /\.csv$/i.test(f.name); };
+    var data = files.filter(isData);
+    // A folder holds both - the .js already contains every CSV, so prefer it
+    var use = data.length ? data : files.filter(isCsv);
+    if (!use.length) {
+      $("status").textContent = "Nothing to open in " + label + ": expected transfers-data.js or transfers.YYYY-MM-DD.csv files.";
+      $("status").className = "sub stale";
+      return;
+    }
+    var left = use.length, list = [], gen = null, bad = [];
+    $("status").textContent = "Reading " + left + " file(s) from " + label + "...";
+    use.forEach(function (f) {
+      var rd = new FileReader();
+      rd.onload = function () {
+        try {
+          if (isData(f)) { var g = addDataJs(rd.result, list); if (g && (!gen || g > gen)) gen = g; }
+          else addCsv(rd.result, list);
+        } catch (e) { bad.push(f.name); }
+        if (--left === 0) {
+          rows = list; manual = label + (gen ? " (data generated " + gen + ")" : "");
+          $("auto").checked = false;      // a picked file cannot be re-read automatically
+          afterLoad();
+          if (bad.length) { $("status").textContent += "  -  could not read: " + bad.join(", "); $("status").className = "sub stale"; }
+        }
+      };
+      rd.readAsText(f, "utf-8");
+    });
+  }
+
+  $("load").addEventListener("click", function () { $("picker").click(); });
+  $("opendir").addEventListener("click", function () { $("dirpicker").click(); });
+  $("picker").addEventListener("change", function () {
+    var files = Array.prototype.slice.call(this.files);
+    if (files.length) openFiles(files, files.length === 1 ? files[0].name : files.length + " files", false);
+    this.value = "";
+  });
+  $("dirpicker").addEventListener("change", function () {
+    var files = Array.prototype.slice.call(this.files), dir;
+    // Only the chosen folder itself, not its subfolders
+    files = files.filter(function (f) { return (f.webkitRelativePath || f.name).split("/").length <= 2; });
+    dir = files.length ? (files[0].webkitRelativePath || "").split("/")[0] : "";
+    if (files.length) openFiles(files, "folder " + (dir || "?"), true);
+    else { $("status").textContent = "The chosen folder is empty."; $("status").className = "sub stale"; }
+    this.value = "";
+  });
+
+  loadState();
+  loadData(true);
+  setInterval(function () { if ($("auto").checked && !manual) loadData(false); else status(); }, REFRESH_MS);
+})();
+</script>
+</body>
+</html>
