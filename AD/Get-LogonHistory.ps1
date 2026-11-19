@@ -150,12 +150,16 @@
     Skicka objekten vidare och visa bara anvandare med fler an 10 inloggningar.
 
 .NOTES
-    Version : 1.1.0
+    Version : 1.2.0
     Kraver  : Windows PowerShell 5.1 eller PowerShell 7. Kor som administrator (lokal admin) -
               Security-loggen kan inte lasas utan det. Skriptet varnar om rattigheter saknas.
               Skriptet andrar ingenting pa datorn, det bara laser handelseloggar.
 
     Changelog
+      1.2.0  2026-11-19  Kontrollerar "Audit Logon" (auditpol) nar Logon/FailedLogon soks pa den
+                         lokala datorn. Ar den avstangd visas "Audit Logon ar avstangd", hur man
+                         slar pa den (GPO / auditpol + lank) och alternativet NpsAccess,
+                         RdsSession, RdpAuth. Samma tips visas om Logon/FailedLogon gav 0 traffar.
       1.1.0  2026-11-06  Ny kalla NpsAccess (Security 6272, RD Gateway / NPS). Fungerar aven
                          nar "Audit Logon" ar avstangt.
       1.0.0  2026-11-06  Forsta versionen. Generaliserad fran ett kundspecifikt skript som bara
@@ -168,7 +172,9 @@
         Cirkulara loggar skriver over de aldsta handelserna nar de ar fulla. Avsnittet
         "Loggdjup" visar hur langt bak varje logg gar - resultatet galler bara den perioden.
       * Security 4624/4625 forutsatter att granskning ("Audit Logon") ar paslagen for Success
-        respektive Failure. Kontrollera med:  auditpol /get /subcategory:Logon
+        respektive Failure. Skriptet kontrollerar detta sjalvt pa den lokala datorn. Manuellt
+        (fungerar oavsett sprak pa Windows):
+          auditpol /get /subcategory:"{0CCE9215-69AE-11D9-BED3-505054503030}"
       * Kalladressen kan saknas eller vara ett platshallarvarde. Pa en RDS-server med
         RD Gateway visade handelse 21 "::%16777216" i stallet for klientens IP, medan
         6272 (NpsAccess) inneholl klientdatorns namn men ingen IP. Skriptet visar
@@ -426,6 +432,53 @@ function ConvertTo-Record {
     return (New-Rec $Ev $Src (Join-AccountName $udom $uname) $ip $detail)
 }
 
+$auditLogonGuid = '{0CCE9215-69AE-11D9-BED3-505054503030}'
+$auditDocUrl = 'https://learn.microsoft.com/windows-server/identity/ad-ds/plan/security-best-practices/advanced-audit-policy-configuration'
+$scriptLeaf = if ($PSCommandPath) { Split-Path -Leaf $PSCommandPath } else { 'Get-LogonHistory.ps1' }
+
+function Get-AuditLogonSetting {
+    # Effektiv installning for underkategorin Logon pa den lokala datorn:
+    # 0 = av, 1 = Success, 2 = Failure, 3 = bada. $null = kunde inte lasas.
+    # Laser kolumnen "Setting Value" ur auditpol /backup - ett tal, oberoende av Windows-sprak.
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ('auditpol_{0}.csv' -f [guid]::NewGuid())
+    try {
+        $null = & auditpol.exe /backup "/file:$tmp" 2>&1
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $tmp)) { return $null }
+        # Kolumner: Machine Name, Policy Target, Subcategory, Subcategory GUID,
+        #           Inclusion Setting, Exclusion Setting, Setting Value
+        $rows = Import-Csv -LiteralPath $tmp -Header 'c0', 'c1', 'c2', 'c3', 'c4', 'c5', 'c6'
+        $row = $rows | Where-Object { $_.c3 -eq $auditLogonGuid } | Select-Object -First 1
+        if (-not $row) { return $null }
+        $v = 0
+        if ([int]::TryParse(([string]$row.c6).Trim(), [ref]$v)) { return $v }
+        return $null
+    }
+    catch {
+        Write-Verbose "Kunde inte lasa auditpol: $($_.Exception.Message)"
+        return $null
+    }
+    finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Show-AuditLogonHelp {
+    # Instruktion: sla pa Audit Logon, eller anvand kallor som inte beror pa den.
+    Write-Host '  Sa slar du pa granskningen (galler bara framat - det som inte loggats gar inte att fa fram):' -ForegroundColor Yellow
+    Write-Host '    GPO (rekommenderat pa en domanmedlem):'
+    Write-Host '      Computer Configuration > Policies > Windows Settings > Security Settings >'
+    Write-Host '      Advanced Audit Policy Configuration > Audit Policies > Logon/Logoff >'
+    Write-Host '      Audit Logon = Success, Failure'
+    Write-Host '      Security Options > "Audit: Force audit policy subcategory settings ..." = Enabled'
+    Write-Host '    Lokalt (snabbtest - kan skrivas over av GPO vid nasta gpupdate):'
+    Write-Host ('      auditpol /set /subcategory:"{0}" /success:enable /failure:enable' -f $auditLogonGuid)
+    Write-Host ('    Mer info: {0}' -f $auditDocUrl)
+    Write-Host '  Alternativ nu - kallor som inte beror pa Audit Logon:' -ForegroundColor Yellow
+    Write-Host ('    .\{0} -Source NpsAccess,RdsSession,RdpAuth -IncludeReconnect' -f $scriptLeaf)
+    Write-Host '      NpsAccess  = uppkopplingar via RD Gateway / NPS (Security 6272, konto + klientdator)'
+    Write-Host '      RdsSession = RDS-sessionsinloggningar, RdpAuth = RDP-autentisering med kalladress'
+}
+
 # ---------------------------------------------------------------------------
 # Rubrik
 # ---------------------------------------------------------------------------
@@ -459,6 +512,51 @@ $periodText = if ($null -ne $from) { $from.ToString('yyyy-MM-dd HH:mm') } else {
 $periodText += ' - '
 $periodText += if ($null -ne $to) { $to.ToString('yyyy-MM-dd HH:mm') } else { 'nu' }
 Write-Host ("  Period : {0}" -f $periodText)
+
+# ---------------------------------------------------------------------------
+# Audit Logon (bara lokalt och bara om Logon/FailedLogon ska sokas)
+# ---------------------------------------------------------------------------
+$needSuccess = $sources -contains 'Logon'
+$needFailure = $sources -contains 'FailedLogon'
+$auditOff = $false
+$auditHelpShown = $false
+$auditSetting = $null
+if (($needSuccess -or $needFailure) -and -not $ComputerName -and (Test-IsAdministrator)) {
+    $auditSetting = Get-AuditLogonSetting
+    if ($null -eq $auditSetting) {
+        Write-Host '  Audit Logon : kunde inte lasas (auditpol)'
+    }
+    else {
+        $auditText = switch ($auditSetting) {
+            0 { 'No Auditing (avstangd)' }
+            1 { 'Success' }
+            2 { 'Failure' }
+            3 { 'Success och Failure' }
+            default { "okant varde $auditSetting" }
+        }
+        Write-Host ("  Audit Logon : {0}" -f $auditText)
+
+        $missing = @()
+        if ($needSuccess -and -not ($auditSetting -band 1)) { $missing += 'Success -> 4624 loggas inte (kalla Logon)' }
+        if ($needFailure -and -not ($auditSetting -band 2)) { $missing += 'Failure -> 4625 loggas inte (kalla FailedLogon)' }
+        if ($missing.Count -gt 0) {
+            $auditOff = $true
+            Write-Host ''
+            if ($auditSetting -eq 0) {
+                Write-Warning 'Audit Logon ar avstangd pa den har datorn - nya inloggningar (4624/4625) skrivs inte till Security-loggen.'
+            }
+            else {
+                Write-Warning 'Audit Logon ar avstangd for en del av det som efterfragas:'
+            }
+            foreach ($m in $missing) { Write-Host "    $m" -ForegroundColor Yellow }
+            Show-AuditLogonHelp
+            $auditHelpShown = $true
+        }
+    }
+}
+elseif (($needSuccess -or $needFailure) -and $ComputerName) {
+    Write-Verbose 'Audit Logon kontrolleras bara pa den lokala datorn.'
+}
 
 # ---------------------------------------------------------------------------
 # Loggdjup
@@ -502,6 +600,7 @@ if (-not $SkipLogInfo) {
 # ---------------------------------------------------------------------------
 Write-Host "`n=== Hamtar handelser ===" -ForegroundColor Cyan
 $all = New-Object System.Collections.Generic.List[object]
+$readCount = @{}
 
 foreach ($s in $sources) {
     switch ($s) {
@@ -534,7 +633,32 @@ foreach ($s in $sources) {
             $kept++
         }
     }
+    $readCount[$s] = $events.Count
     Write-Host ("  {0,-12}: {1} handelser lasta, {2} efter filter" -f $s, $events.Count, $kept)
+}
+
+# 0 traffar i Logon/FailedLogon: forklara utifran vad auditkontrollen visade
+$securityEmpty = @($sources | Where-Object { $_ -in @('Logon', 'FailedLogon') -and $readCount.ContainsKey($_) -and $readCount[$_] -eq 0 })
+if ($securityEmpty.Count -gt 0) {
+    $bitFor = @{ Logon = 1; FailedLogon = 2 }
+    $emptyOff = @(); $emptyOn = @(); $emptyUnknown = @()
+    foreach ($s in $securityEmpty) {
+        if ($null -eq $auditSetting) { $emptyUnknown += $s }
+        elseif ($auditSetting -band $bitFor[$s]) { $emptyOn += $s }
+        else { $emptyOff += $s }
+    }
+    Write-Host ''
+    if ($emptyOff.Count -gt 0) {
+        Write-Warning ("{0}: 0 handelser - Audit Logon ar avstangd (se ovan)." -f ($emptyOff -join ', '))
+    }
+    if ($emptyOn.Count -gt 0) {
+        Write-Warning ("{0}: 0 handelser. Audit Logon ar paslagen, sa det fanns inga traffar for vald period och valda inloggningstyper. Prova en langre period eller fler typer med -LogonType." -f ($emptyOn -join ', '))
+    }
+    if ($emptyUnknown.Count -gt 0) {
+        Write-Warning ("{0}: 0 handelser i Security-loggen. Vanligaste orsaken: Audit Logon ar avstangd. Kontrollera pa datorn med:" -f ($emptyUnknown -join ', '))
+        Write-Host ('    auditpol /get /subcategory:"{0}"' -f $auditLogonGuid)
+        if (-not $auditHelpShown) { Show-AuditLogonHelp }
+    }
 }
 
 if ($all.Count -eq 0) {
