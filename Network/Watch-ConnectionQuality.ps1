@@ -15,7 +15,7 @@
 
     HASTIGHETSTEST: 10 s efter start och sedan var -SpeedTestIntervalMin:e minut mats ned- och
     uppladdning PER NATVERKSKORT (alla aktiva kort med IPv4 och default gateway, -SpeedTestAdapter
-    filtrerar) mot speed.cloudflare.com. TCP-anslutningarna binds till kortets IP, sa varje kort
+    filtrerar) mot speed.cloudflare.com, eller mot Ookla med -SpeedTestProvider Ookla. TCP-anslutningarna binds till kortets IP, sa varje kort
     mats over sin egen lank; korten testas ett i taget. Testet kors i bakgrunden. Pingar som gors
     medan det pagar far UnderLoad = True i CSV:n, raknas inte in i status/handelser/statistiken
     och redovisas separat som latens under last (bufferbloat). Varje test forbrukar data
@@ -57,11 +57,30 @@
     HTTPS-server med Cloudflare-kompatibla andpunkter /__down?bytes=N och /__up.
     Default speed.cloudflare.com. Cloudflare svarar 429 Too Many Requests om man kor manga
     tester tatt (sett efter ca 20 tester inom 1,5 h); det loggas som fel for det testet.
+    Anvands bara med -SpeedTestProvider Cloudflare.
+.PARAMETER SpeedTestProvider
+    Vilken tjanst hastighetstestet kor mot:
+      Cloudflare (default) - inbyggd matning mot -SpeedTestHost, inget att installera.
+      Ookla                - officiella Speedtest CLI (speedtest.exe), bunden till kortets IP med
+                             --ip. Installeras med: winget install Ookla.Speedtest.CLI
+    Ookla valjer narmaste server sjalv (eller -OoklaServerId) och tar ca 25-40 s per kort.
+    -SpeedTestSec och -SpeedTestStreams paverkar inte Ookla.
+.PARAMETER OoklaPath
+    Sokvag till Ooklas speedtest.exe. Utan den letas den i PATH, i WinGet-paketkatalogen och
+    bredvid skriptet.
+.PARAMETER OoklaServerId
+    Ookla-serverns id (lista: speedtest.exe -L). 0 (default) = Ookla valjer.
 .NOTES
-    Version: 1.2.0
-    Datum:   2026-11-04
+    Version: 1.3.0
+    Datum:   2026-11-10
 
     Andringslogg:
+      1.3.0  2026-11-10  Flyttad fran repots rot till Network/.
+                         -SpeedTestProvider Cloudflare|Ookla (+ -OoklaPath, -OoklaServerId).
+                         Sokvagarna till de sparade filerna skrivs ut nar korningen stoppas
+                         (aven vid Ctrl+C). Last CSV (t.ex. oppen i Excel) stoppar inte langre
+                         korningen i fortid - raderna vantar i minnet och skrivs nar filen ar
+                         ledig (vid stopp till en _ej-sparat_-fil bredvid).
       1.2.0  2026-11-04  Hastighetstest ned/upp per natverkskort (-SpeedTestIntervalMin m.fl.),
                          egen CSV, latens under last redovisas separat. Samma matmotor som
                          Network/Test-WifiConnection.ps1.
@@ -86,6 +105,9 @@
 .EXAMPLE
     .\Watch-ConnectionQuality.ps1 -SpeedTestIntervalMin 0
     Bara latens/jitter/forlust, inga hastighetstester (som v1.1).
+.EXAMPLE
+    .\Watch-ConnectionQuality.ps1 -DurationHours 2 -SpeedTestIntervalMin 30 -SpeedTestProvider Ookla
+    Hastighetstest med Ooklas Speedtest CLI i stallet for Cloudflare.
 #>
 
 [CmdletBinding()]
@@ -127,11 +149,19 @@ param(
     [ValidateRange(1, 16)]
     [int]$SpeedTestStreams = 4,
 
-    [string]$SpeedTestHost = 'speed.cloudflare.com'
+    [string]$SpeedTestHost = 'speed.cloudflare.com',
+
+    [ValidateSet('Cloudflare', 'Ookla')]
+    [string]$SpeedTestProvider = 'Cloudflare',
+
+    [string]$OoklaPath,
+
+    [ValidateRange(0, 2147483647)]
+    [int]$OoklaServerId = 0
 )
 
 # --- Variables ---
-$ScriptVersion = '1.2.0'   # Hall i synk med .NOTES
+$ScriptVersion = '1.3.0'   # Hall i synk med .NOTES
 $ComputerName = $env:COMPUTERNAME
 # Starttid i filnamnet ger egna filer per korning (krockar inte heller om flera instanser kors parallellt)
 $RunStamp     = Get-Date -Format 'yyyyMMdd_HHmm'
@@ -146,6 +176,16 @@ $Stats = @{}
 $SpeedNics    = @()                                           # kort som testas
 $SpeedResults = [System.Collections.Generic.List[object]]::new()
 $speedTask    = $null
+
+# CSV-rader som vantar pa att en last fil (t.ex. oppen i Excel) blir ledig
+$PendingRows = @{}
+$LockedFiles = @{}
+$ExtraFiles  = @()
+
+# Ookla: ett kort i taget, en speedtest.exe-process at gangen
+$OoklaTimeoutSec = 120
+$Ookla = @{ Exe = $null; Active = $false; Queue = $null; Proc = $null; Idx = -1; Out = $null; Err = $null
+            Started = $null; Results = $null }
 
 # --- Hastighetstest per natverkskort (C#) ---
 # EXAKT kopia av blocket i Network/Test-WifiConnection.ps1 (samma typnamn), sa att bada
@@ -461,7 +501,63 @@ function Write-Log {
     )
     $entry = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] [$Level] $Message"
     Write-Verbose $entry
-    Add-Content -Path $EventLogPath -Value $entry -Encoding UTF8
+    # Ett lasfel i loggfilen far aldrig stoppa overvakningen
+    try { Add-Content -Path $EventLogPath -Value $entry -Encoding UTF8 -ErrorAction Stop }
+    catch { Write-Warning "Kunde inte skriva till $EventLogPath ($($_.Exception.Message)): $entry" }
+}
+
+function Write-CsvRow {
+    <#
+        Lagger till en rad i en CSV-fil. Ar filen last (typiskt: oppen i Excel) sparas raden i
+        minnet och skrivs nar filen ar ledig igen - overvakningen fortsatter. Tidigare (v1.2.0)
+        stoppade ett lasfel hela korningen i fortid.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$Row
+    )
+
+    if (-not $PendingRows.ContainsKey($Path)) { $PendingRows[$Path] = [System.Collections.Generic.List[object]]::new() }
+    $q = $PendingRows[$Path]
+    $q.Add($Row)
+    try {
+        $q.ToArray() | Export-Csv -Path $Path -Append -NoTypeInformation -Delimiter $Delimiter -Encoding UTF8 -ErrorAction Stop
+        if ($LockedFiles.ContainsKey($Path)) {
+            Write-Log "Kan skriva till $Path igen - $($q.Count) vantande rader skrivna."
+            Write-Host "Kan skriva till $Path igen ($($q.Count) rader ikapp)." -ForegroundColor Cyan
+            $LockedFiles.Remove($Path)
+        }
+        $q.Clear()
+    }
+    catch {
+        if (-not $LockedFiles.ContainsKey($Path)) {
+            $LockedFiles[$Path] = $true
+            $msg = "Kan inte skriva till $Path ($($_.Exception.Message)). Ar filen oppen i Excel? Raderna sparas i minnet och skrivs nar filen ar ledig - stang filen eller oppna en kopia."
+            Write-Log $msg -Level WARN
+            Write-Host $msg -ForegroundColor Yellow
+        }
+    }
+}
+
+function Save-PendingRows {
+    # Vid stopp: forsok en sista gang; ar filen fortfarande last skrivs raderna till en ny fil bredvid
+    foreach ($path in @($PendingRows.Keys)) {
+        $q = $PendingRows[$path]
+        if (-not $q.Count) { continue }
+        try {
+            $q.ToArray() | Export-Csv -Path $path -Append -NoTypeInformation -Delimiter $Delimiter -Encoding UTF8 -ErrorAction Stop
+        }
+        catch {
+            $alt = [System.IO.Path]::ChangeExtension($path, $null).TrimEnd('.') + "_ej-sparat_$(Get-Date -Format 'HHmmss').csv"
+            try {
+                $q.ToArray() | Export-Csv -Path $alt -NoTypeInformation -Delimiter $Delimiter -Encoding UTF8 -ErrorAction Stop
+                Write-Log "$path var last vid stopp - $($q.Count) rader skrevs till $alt i stallet." -Level WARN
+                $script:ExtraFiles += $alt
+            }
+            catch { Write-Log "Kunde inte spara $($q.Count) rader for $path : $_" -Level ERROR }
+        }
+        $q.Clear()
+    }
 }
 
 function Get-DefaultGateway {
@@ -655,21 +751,26 @@ function Complete-SpeedTest {
 
     foreach ($r in $Results) {
         $nic = $SpeedNics[$r.Index]
+        # Ookla-resultat (PSCustomObject) har egen Server/ResultUrl; Cloudflare-resultat (C#) har det inte
+        $server = if ($r.PSObject.Properties['Server'] -and $r.Server) { $r.Server } else { $SpeedTestHost }
+        $url    = if ($r.PSObject.Properties['ResultUrl'] -and $r.ResultUrl) { $r.ResultUrl } else { $null }
         $row = [PSCustomObject]@{
             Timestamp = $r.Started.ToString('yyyy-MM-dd HH:mm:ss')
             Computer  = $ComputerName
             Adapter   = $nic.Name
             SourceIP  = $nic.Src
             LinkSpeed = $nic.LinkSpeed
-            Server    = $SpeedTestHost
+            Provider  = $SpeedTestProvider
+            Server    = $server
             DownMbps  = if ($r.DownMbps -ge 0) { [math]::Round($r.DownMbps, 1) } else { $null }
             UpMbps    = if ($r.UpMbps -ge 0) { [math]::Round($r.UpMbps, 1) } else { $null }
             DownMB    = [math]::Round($r.DownBytes / 1MB, 1)
             UpMB      = [math]::Round($r.UpBytes / 1MB, 1)
             Status    = if ($r.Error) { 'ERROR' } else { 'OK' }
             Error     = if ($r.Error) { $r.Error } else { $null }
+            ResultUrl = $url
         }
-        $row | Export-Csv -Path $SpeedCsvPath -Append -NoTypeInformation -Delimiter $Delimiter -Encoding UTF8 -ErrorAction Stop
+        Write-CsvRow -Path $SpeedCsvPath -Row $row
         $SpeedResults.Add($row)
 
         $down = if ($null -ne $row.DownMbps) { $row.DownMbps } else { 'fel' }
@@ -679,6 +780,119 @@ function Complete-SpeedTest {
         Write-Log $msg -Level $(if ($r.Error) { 'WARN' } else { 'INFO' })
         Write-Host "$($row.Timestamp)  $msg" -ForegroundColor $(if ($r.Error) { 'Yellow' } else { 'Green' })
     }
+}
+
+function Find-OoklaCli {
+    # Letar upp Ooklas speedtest.exe och kontrollerar att det ar Ooklas (inte t.ex. Python-klonen speedtest-cli)
+    param([string]$Path)
+
+    $cands = [System.Collections.Generic.List[string]]::new()
+    if ($Path) { $cands.Add($Path) }
+    else {
+        foreach ($c in @(Get-Command speedtest.exe -All -CommandType Application -ErrorAction SilentlyContinue)) { $cands.Add($c.Source) }
+        # Ingen -Recurse: wildcard + -Recurse i PS 5.1 soker igenom hela disken
+        foreach ($f in @(Get-ChildItem -Path "$env:LOCALAPPDATA\Microsoft\WinGet\Packages\Ookla.Speedtest.CLI*\speedtest.exe" -ErrorAction SilentlyContinue)) { $cands.Add($f.FullName) }
+        if ($PSScriptRoot) { $cands.Add((Join-Path $PSScriptRoot 'speedtest.exe')) }
+    }
+    foreach ($p in $cands) {
+        if (-not $p -or -not (Test-Path -LiteralPath $p)) { continue }
+        try {
+            $v = (& $p --version 2>&1 | Out-String)
+            if ($v -match 'Ookla') { return $p }
+            Write-Log "Hastighetstest: '$p' ar inte Ooklas Speedtest CLI - hoppar over." -Level WARN
+        }
+        catch {
+            Write-Log "Hastighetstest: kunde inte kora '$p': $_" -Level WARN
+        }
+    }
+    return $null
+}
+
+function Start-OoklaNic {
+    # Startar speedtest.exe for nasta kort i kon (kors i bakgrunden, utdata till temp-filer)
+    $Ookla.Idx     = $Ookla.Queue.Dequeue()
+    $src           = $SpeedNics[$Ookla.Idx].Src
+    $base          = Join-Path $env:TEMP "WatchConnQuality_ookla_${PID}_$($Ookla.Idx)"
+    $Ookla.Out     = "$base.out"
+    $Ookla.Err     = "$base.err"
+    $Ookla.Started = Get-Date
+    $argList = @('--accept-license', '--accept-gdpr', '--format=json', '--progress=no', "--ip=$src")
+    if ($OoklaServerId -gt 0) { $argList += "--server-id=$OoklaServerId" }
+    try {
+        $Ookla.Proc = Start-Process -FilePath $Ookla.Exe -ArgumentList $argList -NoNewWindow -PassThru `
+                          -RedirectStandardOutput $Ookla.Out -RedirectStandardError $Ookla.Err -ErrorAction Stop
+        $null = $Ookla.Proc.Handle   # PS 5.1: behall handtaget sa att HasExited/ExitCode gar att lasa
+    }
+    catch {
+        $Ookla.Proc = $null
+        $Ookla.Results.Add((Read-OoklaResult -StartError "$_"))
+    }
+}
+
+function Read-OoklaResult {
+    # Tolkar speedtest.exe:s JSON-utdata (en rad per objekt; type=result ar slutresultatet)
+    param([switch]$TimedOut, [string]$StartError)
+
+    $r = [PSCustomObject]@{
+        Index = $Ookla.Idx; Src = $SpeedNics[$Ookla.Idx].Src; Started = $Ookla.Started
+        DownMbps = -1; UpMbps = -1; DownBytes = 0; UpBytes = 0; Error = ''; Server = ''; ResultUrl = ''
+    }
+    if ($StartError) { $r.Error = "kunde inte starta speedtest.exe: $StartError"; return $r }
+
+    $res = $null; $lastErr = $null
+    foreach ($line in @(Get-Content -LiteralPath $Ookla.Out -ErrorAction SilentlyContinue)) {
+        if ($line -notmatch '^\s*\{') { continue }
+        try { $o = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+        if ($o.type -eq 'result') { $res = $o }
+        elseif ($o.level -eq 'error' -and $o.message -notmatch '^bind\(') { $lastErr = $o.message }
+        elseif ($o.error) { $lastErr = $o.error }
+    }
+
+    if ($res) {
+        $r.DownMbps  = [double]$res.download.bandwidth * 8 / 1e6
+        $r.UpMbps    = [double]$res.upload.bandwidth * 8 / 1e6
+        $r.DownBytes = [long]$res.download.bytes
+        $r.UpBytes   = [long]$res.upload.bytes
+        $r.Server    = "$($res.server.name), $($res.server.location) (id $($res.server.id))"
+        if ($res.result.url) { $r.ResultUrl = $res.result.url }
+        # Kontroll att testet faktiskt gick over ratt kort
+        $used = $res.interface.internalIp
+        if ($used -and $used -ne $r.Src) { $r.Error = "Ookla anvande $used i stallet for $($r.Src)" }
+    }
+    else {
+        $errText = (Get-Content -LiteralPath $Ookla.Err -ErrorAction SilentlyContinue | Where-Object { $_ }) -join ' '
+        $r.Error = if ($TimedOut) { "timeout efter $OoklaTimeoutSec s" }
+                   elseif ($lastErr) { $lastErr }
+                   elseif ($errText) { $errText }
+                   else { 'inget resultat fran speedtest.exe' }
+    }
+    foreach ($f in $Ookla.Out, $Ookla.Err) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+    return $r
+}
+
+function Step-OoklaRun {
+    # Anropas varje varv: skordar ett klart kort och startar nasta. -NoMore = starta inga fler kort.
+    param([switch]$NoMore)
+
+    if (-not $Ookla.Active) { return }
+    if ($Ookla.Proc) {
+        $timedOut = ((Get-Date) - $Ookla.Started).TotalSeconds -gt $OoklaTimeoutSec
+        if (-not $Ookla.Proc.HasExited -and -not $timedOut) { return }
+        if (-not $Ookla.Proc.HasExited) {
+            try { $Ookla.Proc.Kill() } catch { Write-Verbose "Kill: $_" }
+            $null = $Ookla.Proc.WaitForExit(5000)
+        }
+        $Ookla.Results.Add((Read-OoklaResult -TimedOut:$timedOut))
+        $Ookla.Proc = $null
+    }
+    if ($NoMore -and $Ookla.Queue.Count) {
+        Write-Log "Hastighetstest: tiden slut - $($Ookla.Queue.Count) kort testades inte i sista omgangen." -Level WARN
+        $Ookla.Queue.Clear()
+    }
+    if ($Ookla.Queue.Count) { Start-OoklaNic; if ($Ookla.Proc) { return } ; Step-OoklaRun -NoMore:$NoMore; return }
+
+    $Ookla.Active = $false
+    if ($Ookla.Results.Count) { Complete-SpeedTest -Results $Ookla.Results.ToArray() }
 }
 
 function Get-Median([double[]]$Values) {
@@ -736,6 +950,15 @@ try {
         if (-not $SpeedNics.Count) {
             Write-Log "Hastighetstest: inga aktiva kort med IPv4 och default gateway matchar '$($SpeedTestAdapter -join "', '")' - hastighetstest av." -Level WARN
         }
+        elseif ($SpeedTestProvider -eq 'Ookla') {
+            $Ookla.Exe = Find-OoklaCli -Path $OoklaPath
+            if (-not $Ookla.Exe) {
+                $msg = 'Hastighetstest: hittar inte Ooklas speedtest.exe - hastighetstest av. Installera med "winget install Ookla.Speedtest.CLI" (ny konsol efterat) eller ange -OoklaPath.'
+                Write-Log $msg -Level WARN
+                Write-Host $msg -ForegroundColor Yellow
+                $SpeedNics = @()
+            }
+        }
     }
 
     # Kolumnbredd for malnamn i live-vyn
@@ -749,7 +972,12 @@ try {
     Write-Host "Watch-ConnectionQuality v$ScriptVersion - overvakar $($targets -join ', ') till $($endTime.ToString('yyyy-MM-dd HH:mm')). Ctrl+C for att avbryta." -ForegroundColor Cyan
     Write-Host "Loggar till $CsvPath" -ForegroundColor Cyan
     if ($SpeedNics.Count) {
-        $speedInfo = "Hastighetstest: $SpeedTestHost, forst efter 10 s och sedan var $SpeedTestIntervalMin`:e minut, $SpeedTestSec s ned + $SpeedTestSec s upp per kort, $SpeedTestStreams strommar. Kort: " +
+        $how = if ($SpeedTestProvider -eq 'Ookla') {
+            $sid = if ($OoklaServerId -gt 0) { "server $OoklaServerId" } else { 'Ookla valjer server' }
+            "Ookla ($($Ookla.Exe), $sid), ca 25-40 s per kort"
+        }
+        else { "$SpeedTestHost, $SpeedTestSec s ned + $SpeedTestSec s upp per kort, $SpeedTestStreams strommar" }
+        $speedInfo = "Hastighetstest: $how, forst efter 10 s och sedan var $SpeedTestIntervalMin`:e minut. Kort: " +
             (($SpeedNics | ForEach-Object { "$($_.Name) ($($_.Src))" }) -join ', ')
         Write-Log $speedInfo
         Write-Host $speedInfo -ForegroundColor Cyan
@@ -764,27 +992,42 @@ try {
 
         # Hastighetstest: skorda ett avslutat, starta nasta nar det ar dags
         if ($SpeedNics.Count) {
-            if ($speedTask -and $speedTask.IsCompleted) {
-                Complete-SpeedTest -Results $speedTask.Result
-                $speedTask = $null
+            if ($SpeedTestProvider -eq 'Ookla') {
+                Step-OoklaRun
+                if (-not $Ookla.Active -and $loopStart -ge $nextSpeedAt) {
+                    $Ookla.Queue   = [System.Collections.Generic.Queue[int]]::new([int[]](0..($SpeedNics.Count - 1)))
+                    $Ookla.Results = [System.Collections.Generic.List[object]]::new()
+                    $Ookla.Active  = $true
+                    $msg = "Hastighetstest (Ookla) startat ($($SpeedNics.Count) kort, ca $($SpeedNics.Count * 30) s)"
+                    Write-Log $msg
+                    Write-Host "$($loopStart.ToString('yyyy-MM-dd HH:mm:ss'))  $msg" -ForegroundColor DarkCyan
+                    Step-OoklaRun
+                    while ($nextSpeedAt -le $loopStart) { $nextSpeedAt = $nextSpeedAt.AddMinutes($SpeedTestIntervalMin) }
+                }
             }
-            if (-not $speedTask -and $loopStart -ge $nextSpeedAt) {
-                $speedTask = [SpeedTestV1]::StartAll([string[]]@($SpeedNics | ForEach-Object { $_.Src }),
-                    $SpeedTestHost, $SpeedTestSec, $SpeedTestStreams)
-                $msg = "Hastighetstest startat ($($SpeedNics.Count) kort, ca $($SpeedNics.Count * 2 * $SpeedTestSec) s)"
-                Write-Log $msg
-                Write-Host "$($loopStart.ToString('yyyy-MM-dd HH:mm:ss'))  $msg" -ForegroundColor DarkCyan
-                while ($nextSpeedAt -le $loopStart) { $nextSpeedAt = $nextSpeedAt.AddMinutes($SpeedTestIntervalMin) }
+            else {
+                if ($speedTask -and $speedTask.IsCompleted) {
+                    Complete-SpeedTest -Results $speedTask.Result
+                    $speedTask = $null
+                }
+                if (-not $speedTask -and $loopStart -ge $nextSpeedAt) {
+                    $speedTask = [SpeedTestV1]::StartAll([string[]]@($SpeedNics | ForEach-Object { $_.Src }),
+                        $SpeedTestHost, $SpeedTestSec, $SpeedTestStreams)
+                    $msg = "Hastighetstest startat ($($SpeedNics.Count) kort, ca $($SpeedNics.Count * 2 * $SpeedTestSec) s)"
+                    Write-Log $msg
+                    Write-Host "$($loopStart.ToString('yyyy-MM-dd HH:mm:ss'))  $msg" -ForegroundColor DarkCyan
+                    while ($nextSpeedAt -le $loopStart) { $nextSpeedAt = $nextSpeedAt.AddMinutes($SpeedTestIntervalMin) }
+                }
             }
         }
-        $underLoad = $null -ne $speedTask
+        $underLoad = ($null -ne $speedTask) -or $Ookla.Active
 
         foreach ($t in $targets) {
             $result = Measure-Target -ComputerName $t -Count $PingsPerSample -Timeout $TimeoutMs `
                                      -HighLatency $HighLatencyMs -LossWarn $LossWarnPercent
             $result | Add-Member -NotePropertyName UnderLoad -NotePropertyValue $underLoad
 
-            $result | Export-Csv -Path $CsvPath -Append -NoTypeInformation -Delimiter $Delimiter -Encoding UTF8 -ErrorAction Stop
+            Write-CsvRow -Path $CsvPath -Row $result
             # Hog latens under hastighetstest ar vantad - egen statistik, inga statusandringar
             if ($underLoad) { Update-LoadStats -Result $result } else { Update-Stats -Result $result }
 
@@ -801,6 +1044,8 @@ try {
         # Vanta resten av intervallet (matningen i sig tar tid, sa vi drar av den)
         $elapsed   = ((Get-Date) - $loopStart).TotalSeconds
         $remaining = $IntervalSeconds - $elapsed
+        # ...men aldrig forbi sluttiden
+        $remaining = [math]::Min($remaining, ($endTime - (Get-Date)).TotalSeconds)
         if ($remaining -gt 0) { Start-Sleep -Milliseconds ([int]($remaining * 1000)) }
     }
 
@@ -810,6 +1055,11 @@ try {
         while (-not $speedTask.IsCompleted) { Start-Sleep -Milliseconds 200 }
         Complete-SpeedTest -Results $speedTask.Result
         $speedTask = $null
+    }
+    # Ookla: lat kortet som testas just nu bli klart (max $OoklaTimeoutSec s), starta inga fler
+    if ($Ookla.Active) {
+        Write-Host 'Vantar pa pagaende hastighetstest (Ookla)...' -ForegroundColor DarkCyan
+        while ($Ookla.Active) { Step-OoklaRun -NoMore; if ($Ookla.Active) { Start-Sleep -Milliseconds 500 } }
     }
 }
 catch {
@@ -821,6 +1071,11 @@ finally {
     if ($speedTask -and -not $speedTask.IsCompleted) {
         [SpeedTestV1]::Cancel()
         Write-Log 'Pagaende hastighetstest avbrutet.' -Level WARN
+    }
+    if ($Ookla.Proc -and -not $Ookla.Proc.HasExited) {
+        try { $Ookla.Proc.Kill() } catch { Write-Verbose "Kill: $_" }
+        foreach ($f in $Ookla.Out, $Ookla.Err) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+        Write-Log 'Pagaende hastighetstest (Ookla) avbrutet.' -Level WARN
     }
     if ($Stats.Count -gt 0) {
         $summary = Get-Summary
@@ -836,5 +1091,12 @@ finally {
         if (@($Stats.Values | Where-Object { $_.LoadReceived }).Count) {
             Write-Host 'AvgMsUnderLoad/MaxMsUnderLoad = latens medan hastighetstestet pagick (hog = bufferbloat i router/lank).'
         }
+    }
+    # Var resultatet hamnade (aven vid Ctrl+C)
+    Save-PendingRows
+    $saved = @(@($CsvPath, $EventLogPath, $SpeedCsvPath) + $ExtraFiles | Where-Object { Test-Path -LiteralPath $_ })
+    if ($saved.Count) {
+        Write-Host "`nSparade filer:" -ForegroundColor Cyan
+        foreach ($f in $saved) { Write-Host "  $f" -ForegroundColor Cyan }
     }
 }
