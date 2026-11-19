@@ -32,7 +32,7 @@
     .\Get-CustomerReport.ps1 -TenantId "contoso.com" -AdminUPN "admin@contoso.com" -TenantName "Contoso"
 .NOTES
     Authors:  Windows-Admin-Tools contributors
-    Version:  1.6.0
+    Version:  1.6.1
     Changelog:
         1.0.0 - Initial release
         1.1.0 - Fix IsExternal to check all verified tenant domains (not only primary)
@@ -98,6 +98,9 @@
                 as an alias), colours / company name / logo / icon folder read from an optional
                 brand.json beside the script (see brand.sample.json); neutral defaults without it
               - Footer shows the real script version (was stuck at 1.5.3); author credit neutral
+        1.6.1 - customers.json lookup moved to Resolve-M365Customer.ps1 (same folder), shared
+                with move365user-shared and Get-CADeletionAudit. Same behaviour: -Customer,
+                -TenantId matching ShortName/TenantId/PrimaryDomain, single-profile prompt.
 #>
 
 [CmdletBinding()]
@@ -127,63 +130,28 @@ param(
     [string]$OutputFormat = 'HTML'
 )
 
-# ── CUSTOMER PROFILE RESOLUTION ───────────────────────────────────────────────
-$profileData = $null
-$shortName   = $null
-
-if (-not $CustomersFile) {
-    $CustomersFile = Join-Path $PSScriptRoot "customers.json"
+# ── CUSTOMER PROFILE RESOLUTION (building block: Resolve-M365Customer.ps1) ─────
+$resolver = Join-Path $PSScriptRoot 'Resolve-M365Customer.ps1'
+if (-not (Test-Path -LiteralPath $resolver)) { throw "Resolve-M365Customer.ps1 not found next to this script - copy the whole M365 folder." }
+try {
+    $cust = & $resolver -Customer $Customer -TenantId $TenantId -AdminUPN $AdminUPN -CustomersFile $CustomersFile `
+                        -CallerRoot $PSScriptRoot -SelectSingle -ErrorAction Stop
+} catch {
+    Write-Host $_.Exception.Message -ForegroundColor Yellow
+    exit 0
+}
+$CustomersFile = $cust.CustomersFile
+$profileData   = $cust.Profile
+if ($cust.MatchedBy -eq 'TenantId') {
+    Write-Host ""
+    Write-Host "[INFO] Matched profile '$($profileData.ShortName)' via -TenantId lookup" -ForegroundColor Cyan
+    Write-Host "       TenantId : $($profileData.TenantId)" -ForegroundColor Cyan
+    Write-Host "       Domain   : $($profileData.PrimaryDomain)" -ForegroundColor Cyan
 }
 
-if (Test-Path $CustomersFile) {
-    $profiles = Get-Content $CustomersFile -Raw | ConvertFrom-Json
-    $profileList = @($profiles)
-
-    if ($Customer) {
-        $profileData = $profileList | Where-Object { $_.ShortName -ieq $Customer }
-        if (-not $profileData) {
-            $available = ($profileList.ShortName) -join ', '
-            Write-Host "Customer '$Customer' not found in $CustomersFile. Available: $available" -ForegroundColor Yellow
-            exit 0
-        }
-    } elseif ($TenantId) {
-        # -TenantId passed — try to match by ShortName, TenantId field, or PrimaryDomain
-        # so that -TenantId "Contoso" or -TenantId "contoso.com" both load the profile
-        $matched = $profileList | Where-Object {
-            $_.ShortName -ieq $TenantId -or $_.TenantId -ieq $TenantId -or $_.PrimaryDomain -ieq $TenantId
-        }
-        if ($matched) {
-            $profileData = $matched
-            Write-Host ""
-            Write-Host "[INFO] Matched profile '$($profileData.ShortName)' via -TenantId lookup" -ForegroundColor Cyan
-            Write-Host "       TenantId : $($profileData.TenantId)" -ForegroundColor Cyan
-            Write-Host "       Domain   : $($profileData.PrimaryDomain)" -ForegroundColor Cyan
-            # Clear so $EffectiveTenantId picks up the real value from profileData below
-            $TenantId = $null
-        }
-        # If no match: profileData stays null, TenantId stays as literal domain/GUID for Graph connect
-    } elseif ($profileList.Count -eq 1 -and -not $TenantId) {
-        $profileData = $profileList[0]
-        Write-Host ""
-        Write-Host "[INFO] Auto-selected customer: $($profileData.DisplayName) [$($profileData.ShortName)]" -ForegroundColor Cyan
-        Write-Host "       TenantId : $($profileData.TenantId)" -ForegroundColor Cyan
-        Write-Host "       Domain   : $($profileData.PrimaryDomain)" -ForegroundColor Cyan
-        $yn = Read-Host "  Continue with this customer? (Y/N)"
-        if ($yn -notmatch "^[Yy]$") {
-            $available = ($profileList.ShortName) -join ', '
-            Write-Host "Cancelled. Re-run with -Customer <name> to specify. Available: $available" -ForegroundColor Yellow
-            exit 0
-        }
-    } elseif (-not $TenantId) {
-        $available = ($profileList.ShortName) -join ', '
-        Write-Host "Multiple customers in $CustomersFile — specify -Customer <name>. Available: $available" -ForegroundColor Yellow
-        exit 0
-    }
-}
-
-$EffectiveTenantId   = if ($TenantId)   { $TenantId }   elseif ($profileData.TenantId)    { $profileData.TenantId }    else { $null }
-$EffectiveAdminUPN   = if ($AdminUPN)   { $AdminUPN }   elseif ($profileData.AdminUPN)    { $profileData.AdminUPN }    else { $null }
-$EffectiveTenantName = if ($TenantName) { $TenantName } elseif ($profileData.DisplayName) { $profileData.DisplayName } else { "M365 Tenant" }
+$EffectiveTenantId   = $cust.TenantId
+$EffectiveAdminUPN   = $cust.AdminUPN
+$EffectiveTenantName = if ($TenantName) { $TenantName } elseif ($cust.DisplayName) { $cust.DisplayName } else { "M365 Tenant" }
 $shortName           = if ($profileData.ShortName) { $profileData.ShortName } else { $null }
 $isNewTenant         = -not $profileData
 $saveNewToJson       = $false
@@ -1410,7 +1378,7 @@ $mfaNote     = if ($mfaError) { " | MFA data: unavailable" } else { "" }
 $mfaNoteHtml = if ($mfaError) { "<div class='warning' style='margin:0 0 16px'>&#9888; MFA registration data could not be retrieved. Reconnect to Microsoft Graph with the <strong>UserAuthenticationMethod.Read.All</strong> scope included to populate the MFA column.</div>" } else { "" }
 
 # ── BRAND SETUP ───────────────────────────────────────────────────────────────
-$ScriptVersion  = '1.6.0'
+$ScriptVersion  = '1.6.1'
 $logoB64Html    = ""
 $footerLogoHtml = ""
 # Brand values: neutral defaults, overridden by brand.json beside the script (kept out of git).

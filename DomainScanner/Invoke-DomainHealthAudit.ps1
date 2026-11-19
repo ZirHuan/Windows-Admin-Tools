@@ -4,29 +4,44 @@
 
 <#
 .SYNOPSIS
-    Read-only consolidated health/inventory audit for a Windows Active Directory domain.
+    Read-only consolidated health, inventory and security audit for a Windows Active Directory domain.
 
 .DESCRIPTION
-    Single-pass, NON-DESTRUCTIVE audit that inventories a domain and flags things
-    that are commonly wrong or worth handling. Generalized from a set of AD
-    remediation scripts (health report, privileged-account audit, unsigned-LDAP
-    clients, DC decommission readiness) into a domain-agnostic tool driven by
-    parameters and an optional config file.
+    Single-pass, NON-DESTRUCTIVE audit that inventories a domain and flags things that are
+    commonly wrong or worth handling. Domain-agnostic; driven by parameters and an optional
+    JSON config file per environment.
 
     NOTHING here changes state. There is no -Execute parameter. Always safe to re-run.
 
     Check sections (each can be skipped with -Skip):
-      FOREST   Forest/domain functional level, UPN suffixes, tombstone lifetime
-      AD       DC inventory, FSMO placement, replication failures, SYSVOL, DFSR/FRS state
-      SITES    Sites, subnets, sites without subnets, DC-to-site mapping
-      DNS      DC name resolution, scavenging/aging, stale A records
-      CERT     LDAPS TLS handshake + cert expiry, expiring DC machine certs, CA liveness,
-               autoenrollment GPOs vs dead CA, NTAuth store contents
-      USERS    Privileged group membership + risk scoring, krbtgt age,
-               password-never-expires, stale users/computers
-      NET      DC port reachability (LDAP/LDAPS/KRB/GC/DNS/SMB), unsigned LDAP binds (2889/2887)
-      LICENSE  Windows activation state on DCs (best-effort)
-      EVENTS   Critical Directory Service / DFSR errors in the last N hours
+      FOREST    Forest/domain functional level, UPN suffixes, tombstone lifetime
+      AD        DC inventory, FSMO placement, replication failures, SYSVOL, DFSR/FRS,
+                PDC emulator time source
+      SITES     Sites, subnets, sites without subnets, DC-to-site mapping
+      DNS       DC name resolution, scavenging/aging, stale A records
+      CERT      LDAPS TLS handshake + cert expiry, expiring DC machine certs, CA liveness,
+                autoenrollment GPOs vs dead CA, NTAuth store, unlinked GPOs,
+                optional dead-CA blast-radius sweep (-CertSweep)
+      USERS     Privileged accounts + risk scoring, krbtgt age, password policy,
+                password-never-expires, stale users/computers, AdminSDHolder orphans,
+                AS-REP roastable accounts, Protected Users
+      SECURITY  Unconstrained Kerberos delegation, duplicate SPNs, LAPS coverage,
+                Kerberoastable accounts
+      NET       DC port reachability (LDAP/LDAPS/KRB/GC/DNS/SMB), stale IPs on 389,
+                unsigned LDAP binds (2889/2887)
+      LICENSE   Windows activation state on DCs (best-effort)
+      EVENTS    Critical Directory Service / DFSR errors in the last N hours
+
+    BUILDING BLOCKS. Parts that are useful on their own are separate scripts, called here.
+    They are looked up next to this script first, then in the sibling folders of the repo
+    (..\AD, ..\Network), so both the repo layout and a flat release folder work:
+      AD\Get-FsmoRoleHolder.ps1          AD section
+      AD\Get-PrivilegedAccountRisk.ps1   USERS + SECURITY sections
+      AD\Get-UnsignedLdapClient.ps1      NET section
+      Network\Test-TcpPort.ps1           NET section, CA liveness
+      Network\Get-TlsCertificate.ps1     CERT section (LDAPS)
+      DomainScanner\Get-CertBlastRadius.ps1   CERT section, only with -CertSweep
+    Only the tools needed by the sections that run are required.
 
     Output:
       - Colour-coded console table (PASS / WARN / FAIL / INFO)
@@ -44,13 +59,20 @@
 .PARAMETER ConfigPath
     Optional path to a JSON config file describing environment-specific expectations
     (known-risk accounts, expected sites, stale IPs/DC names, expected FSMO holder,
-    dead CA host, checks to skip). See sample.config.json for the format.
+    dead CA host/issuer, checks to skip). See sample.config.json for the format.
 
 .PARAMETER Skip
-    One or more section names to skip: FOREST, AD, SITES, DNS, CERT, USERS, NET, LICENSE, EVENTS.
+    One or more section names to skip:
+    FOREST, AD, SITES, DNS, CERT, USERS, SECURITY, NET, LICENSE, EVENTS.
 
 .PARAMETER SkipGpoScan
     Skip the per-GPO XML report scan in the CERT section (slow on domains with many GPOs).
+    Also skips the unlinked-GPO count, which comes from the same scan.
+
+.PARAMETER CertSweep
+    When a registered CA is dead (or config DeadCAIssuerMatch is set), run
+    Get-CertBlastRadius.ps1 against every enabled Windows computer to find the machines
+    that still hold certs from it. Needs WinRM to the estate; can take minutes.
 
 .PARAMETER EventHoursBack
     Hours of event-log history to scan in the EVENTS and NET (2889) sections. Default 24.
@@ -83,17 +105,17 @@
     Skip the licensing and network-reachability sections (e.g. no remote access to DCs).
 
 .NOTES
-    Version   : 1.1.0
+    Version   : 1.2.0
     Read-only : always safe to re-run
 
     Changelog (full history in CHANGELOG.md):
-      1.1.0  2026-09-28  Fixes from review + test run in an isolated Server 2022 lab:
-                         parse errors (PS5.1 encoding + "$dc:" refs), TCP probe reported
-                         refused ports as open, replication check could never fail,
-                         stale-A filter matched every record, autoenrollment GPO false
-                         positives, certutil -viewstore opened a GUI dialog, EVENTS
-                         reported PASS when the DC was unreachable. Adds LDAPS TLS
-                         handshake + cert expiry, version stamping, -SkipGpoScan.
+      1.2.0  2026-11-19  Merged the two diverged copies (DomainScanner 1.1.0 and
+                         AD/Inventering): new SECURITY section, password policy,
+                         AdminSDHolder orphans, AS-REP roastable, Protected Users,
+                         unlinked GPOs, PDC time source - all rewritten to be
+                         locale-independent. Reusable parts moved to separate tools
+                         (see BUILDING BLOCKS). Privileged groups by SID. -CertSweep.
+      1.1.0  2026-09-28  Fixes from review + lab test run (see CHANGELOG.md).
       1.0.0  2026-09     Initial consolidated seed.
 #>
 
@@ -105,10 +127,12 @@ param(
 
     [string]$ConfigPath = '',
 
-    [ValidateSet('FOREST','AD','SITES','DNS','CERT','USERS','NET','LICENSE','EVENTS')]
+    [ValidateSet('FOREST','AD','SITES','DNS','CERT','USERS','SECURITY','NET','LICENSE','EVENTS')]
     [string[]]$Skip = @(),
 
     [switch]$SkipGpoScan,
+
+    [switch]$CertSweep,
 
     [ValidateRange(1,720)]
     [int]$EventHoursBack = 24,
@@ -126,8 +150,8 @@ param(
     [switch]$Csv
 )
 
-$ScriptVersion = '1.1.0'
-$AllSections   = @('FOREST','AD','SITES','DNS','CERT','USERS','NET','LICENSE','EVENTS')
+$ScriptVersion = '1.2.0'
+$AllSections   = @('FOREST','AD','SITES','DNS','CERT','USERS','SECURITY','NET','LICENSE','EVENTS')
 
 # ======================================================================
 #  ENVIRONMENT CONFIG (defaults, overridable via -ConfigPath JSON)
@@ -139,6 +163,7 @@ $Config = [ordered]@{
     StaleIPs          = @()            # IPs that should no longer answer LDAP
     ExpectedFsmoHolder= ''             # short name if all 5 FSMO should sit on one DC
     DeadCAHostname    = ''             # FQDN of a CA known to be decommissioned
+    DeadCAIssuerMatch = ''             # issuer substring for -CertSweep (e.g. 'CN=Old-CA')
     ServiceAcctRegex  = '^(svc[-_]|sa[-_]|sql|exchange|iis|backup|print|scan|service|mssql)'
     NamedAdminRegex   = '^(adm[-_.]|admin[-_.])'   # personal admin accounts to re-confirm
 }
@@ -151,6 +176,10 @@ if ($ConfigPath) {
             $loaded = Get-Content -Path $ConfigPath -Raw | ConvertFrom-Json
             foreach ($k in @($Config.Keys)) {
                 if ($null -ne $loaded.$k) { $Config[$k] = $loaded.$k }
+            }
+            # Older AD/Inventering configs called it AdminAcctRegex.
+            if ($null -eq $loaded.NamedAdminRegex -and $null -ne $loaded.AdminAcctRegex) {
+                $Config.NamedAdminRegex = $loaded.AdminAcctRegex
             }
             foreach ($s in @($loaded.Skip)) {
                 if (-not $s) { continue }
@@ -172,6 +201,45 @@ if (-not $Domain) {
     throw 'Could not determine the domain. Pass -Domain <fqdn>.'
 }
 $Domain = $Domain.ToLower()
+
+function Test-SectionEnabled { param([string]$Section) return ($Section -notin $SkipList) }
+
+# ======================================================================
+#  BUILDING BLOCKS (separate scripts - see .DESCRIPTION)
+# ======================================================================
+function Resolve-Tool {
+    # Next to this script first (flat release folder), then each sibling folder of the
+    # parent (repo layout: DomainScanner\..\AD, ..\Network).
+    param([Parameter(Mandatory)][string]$Name)
+    $candidates = @(Join-Path $PSScriptRoot $Name)
+    $parent = Split-Path -Path $PSScriptRoot -Parent
+    if ($parent) {
+        $candidates += @(Get-ChildItem -LiteralPath $parent -Directory -ErrorAction SilentlyContinue |
+                         ForEach-Object { Join-Path $_.FullName $Name })
+    }
+    foreach ($c in $candidates) { if (Test-Path -LiteralPath $c -PathType Leaf) { return $c } }
+    return $null
+}
+
+$toolNeeds = [ordered]@{
+    'Get-FsmoRoleHolder.ps1'        = @('AD')
+    'Get-PrivilegedAccountRisk.ps1' = @('USERS','SECURITY')
+    'Get-UnsignedLdapClient.ps1'    = @('NET')
+    'Test-TcpPort.ps1'              = @('NET','CERT')
+    'Get-TlsCertificate.ps1'        = @('CERT')
+}
+if ($CertSweep) { $toolNeeds['Get-CertBlastRadius.ps1'] = @('CERT') }
+$Tool = @{}
+$missing = @()
+foreach ($t in $toolNeeds.GetEnumerator()) {
+    if (-not @($t.Value | Where-Object { Test-SectionEnabled $_ }).Count) { continue }
+    $p = Resolve-Tool $t.Key
+    if ($p) { $Tool[$t.Key] = $p } else { $missing += "$($t.Key) (sections: $($t.Value -join ','))" }
+}
+if ($missing) {
+    throw ("Building-block script(s) not found next to this script or in a sibling folder: " +
+           ($missing -join '; ') + ". Copy the whole release folder, or -Skip those sections.")
+}
 
 # ======================================================================
 #  SETUP
@@ -216,7 +284,7 @@ function Add-Result {
         Extra   = $Extra
     })
     $color = switch ($Status) { 'PASS'{'Green'};'WARN'{'Yellow'};'FAIL'{'Red'};'INFO'{'Cyan'} }
-    Write-Host (" [{0,3}] [{1,-7}] [{2,-4}] {3,-38} {4}" -f `
+    Write-Host (" [{0,3}] [{1,-8}] [{2,-4}] {3,-38} {4}" -f `
         $script:checkNum, $Section, $Status, $Name, $Detail) -ForegroundColor $color
     Write-Log "$Section | $Status | $Name | $Detail"
 }
@@ -227,45 +295,28 @@ function ConvertTo-HtmlText {
     ($Text -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;' -replace '"','&quot;')
 }
 
-function Test-TcpPort {
-    param([string]$HostName, [int]$Port, [int]$TimeoutMs = 3000)
-    # WaitOne() also returns true when the connect FAILED fast (RST / refused), so the
-    # handle alone is not proof of an open port - EndConnect() surfaces the failure.
-    $tcp = New-Object System.Net.Sockets.TcpClient
-    try {
-        $ar = $tcp.BeginConnect($HostName, $Port, $null, $null)
-        if (-not $ar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) { return $false }
-        $tcp.EndConnect($ar)
-        return $tcp.Connected
-    } catch { return $false } finally { $tcp.Close() }
-}
-
-function Get-LdapsCertificate {
-    # Completes a real TLS handshake on 636 and returns the server certificate.
-    # A DC listens on 636 even with no usable cert; only a handshake proves LDAPS works.
-    param([string]$HostName, [int]$TimeoutMs = 5000)
-    $tcp = New-Object System.Net.Sockets.TcpClient
-    try {
-        $ar = $tcp.BeginConnect($HostName, 636, $null, $null)
-        if (-not $ar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) { throw "TCP 636 timed out" }
-        $tcp.EndConnect($ar)
-        $callback = [System.Net.Security.RemoteCertificateValidationCallback]{ param($s,$c,$ch,$e) $true }
-        $ssl = New-Object System.Net.Security.SslStream($tcp.GetStream(), $false, $callback)
-        try {
-            $ssl.ReadTimeout = $TimeoutMs
-            $ssl.AuthenticateAsClient($HostName)
-            return New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($ssl.RemoteCertificate)
-        } finally { $ssl.Dispose() }
-    } finally { $tcp.Close() }
-}
-
 function Test-NoEventsError {
     # Locale-independent: Get-WinEvent raises NoMatchingEventsFound when the filter is simply empty.
     param($ErrorRecord)
     return ("$($ErrorRecord.FullyQualifiedErrorId)" -match 'NoMatchingEventsFound')
 }
 
-function Test-SectionEnabled { param([string]$Section) return ($Section -notin $SkipList) }
+function Test-PortOpen {
+    param([string]$HostName, [int]$Port, [int]$TimeoutMs = 3000)
+    return [bool](& $Tool['Test-TcpPort.ps1'] -ComputerName $HostName -Port $Port -TimeoutMs $TimeoutMs).Open
+}
+
+function Join-First {
+    # First N items joined, with "(+M more)" so long lists stay readable in the report.
+    param([object[]]$Items, [int]$N = 25, [string]$Sep = ', ')
+    $Items = @($Items)
+    $s = (@($Items | Select-Object -First $N) -join $Sep)
+    if ($Items.Count -gt $N) { $s += " (+$($Items.Count - $N) more)" }
+    return $s
+}
+
+# Server-side LDAP bit tests (userAccountControl)
+$ldapEnabled = '(!(userAccountControl:1.2.840.113556.1.4.803:=2))'
 
 # ======================================================================
 #  HEADER
@@ -277,7 +328,7 @@ Write-Host "  Domain     : $Domain"
 Write-Host "  Date       : $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
 Write-Host "  Skipping   : $(if($SkipList){$SkipList -join ', '}else{'(nothing)'})"
 Write-Host ""
-Write-Host (" {0,-5} {1,-9} {2,-6} {3,-38} {4}" -f '#','Section','Status','Check','Detail') -ForegroundColor White
+Write-Host (" {0,-5} {1,-10} {2,-6} {3,-38} {4}" -f '#','Section','Status','Check','Detail') -ForegroundColor White
 Write-Host ("-" * 110) -ForegroundColor DarkGray
 
 # Resolve DC list once (used by several sections)
@@ -328,7 +379,7 @@ if (Test-SectionEnabled 'FOREST') {
 }
 
 # ======================================================================
-#  SECTION: AD  (DCs, FSMO, replication, SYSVOL, DFSR)
+#  SECTION: AD  (DCs, FSMO, replication, SYSVOL, DFSR, PDC time)
 # ======================================================================
 if (Test-SectionEnabled 'AD') {
     # DC inventory
@@ -339,21 +390,14 @@ if (Test-SectionEnabled 'AD') {
         Add-Result 'AD' 'DC Inventory' 'FAIL' 'No domain controllers discovered'
     }
 
-    # FSMO
+    # FSMO (building block: Get-FsmoRoleHolder)
+    $pdcFqdn = $null
     try {
-        $dom = Get-ADDomain -Server $Domain -ErrorAction Stop
-        $fst = Get-ADForest -Server $Domain -ErrorAction Stop
-        $fsmo = [ordered]@{
-            PDCEmulator          = $dom.PDCEmulator
-            RIDMaster            = $dom.RIDMaster
-            InfrastructureMaster = $dom.InfrastructureMaster
-            SchemaMaster         = $fst.SchemaMaster
-            DomainNamingMaster   = $fst.DomainNamingMaster
-        }
-        $fsmoLines = ($fsmo.GetEnumerator() | ForEach-Object { "$($_.Key)=$(($_.Value -split '\.')[0])" }) -join '; '
+        $fsmo = @(& $Tool['Get-FsmoRoleHolder.ps1'] -Domain $Domain -ExpectedHolder $Config.ExpectedFsmoHolder -ErrorAction Stop)
+        $pdcFqdn = ($fsmo | Where-Object Role -eq 'PDCEmulator').Holder
+        $fsmoLines = ($fsmo | ForEach-Object { "$($_.Role)=$($_.HolderShort)" }) -join '; '
         if ($Config.ExpectedFsmoHolder) {
-            $offHolder = $fsmo.Values | Where-Object { (($_ -split '\.')[0]) -ine $Config.ExpectedFsmoHolder }
-            if ($offHolder) {
+            if (@($fsmo | Where-Object { -not $_.OnExpected }).Count -gt 0) {
                 Add-Result 'AD' 'FSMO Placement' 'WARN' "Not all on $($Config.ExpectedFsmoHolder)" $fsmoLines
             } else {
                 Add-Result 'AD' 'FSMO Placement' 'PASS' "All 5 on $($Config.ExpectedFsmoHolder)" $fsmoLines
@@ -403,6 +447,35 @@ if (Test-SectionEnabled 'AD') {
             Add-Result 'AD' 'SYSVOL Engine' 'PASS' 'No legacy FRS subscriber objects (DFSR expected)'
         }
     } catch { Add-Result 'AD' 'SYSVOL Engine' 'INFO' "Could not determine SYSVOL engine: $_" }
+
+    # PDC emulator time source. The forest-root PDC is the domain's time master and must
+    # sync from an external NTP source (Type=NTP), not the hierarchy (NT5DS) or nothing.
+    # Read from the registry + service state - locale-independent, unlike w32tm text.
+    if ($pdcFqdn) {
+        try {
+            $tm = Invoke-Command -ComputerName $pdcFqdn -ErrorAction Stop -ScriptBlock {
+                $p = Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Parameters' -ErrorAction Stop
+                $vm = $false
+                try { $vm = [bool]((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).Model -match 'Virtual|VMware|KVM|QEMU|HVM') } catch { }
+                [PSCustomObject]@{
+                    Type      = "$($p.Type)"
+                    NtpServer = "$($p.NtpServer)"
+                    Service   = "$((Get-Service W32Time -ErrorAction SilentlyContinue).Status)"
+                    IsVM      = $vm
+                }
+            }
+            $isRootPdc = $true
+            try { $isRootPdc = ((Get-ADForest -Server $Domain).RootDomain -ieq $Domain) } catch { }
+            $desc = "Type=$($tm.Type) NtpServer=$($tm.NtpServer) Service=$($tm.Service)$(if($tm.IsVM){' (VM)'})"
+            if ($tm.Service -ne 'Running') {
+                Add-Result 'AD' 'PDC Time Source' 'FAIL' "W32Time is not running on the PDC ($pdcFqdn)" $desc
+            } elseif ($isRootPdc -and $tm.Type -ne 'NTP' -and $tm.Type -ne 'AllSync') {
+                Add-Result 'AD' 'PDC Time Source' 'WARN' "Forest-root PDC ($pdcFqdn) is not set to an external NTP source - domain time is free-running$(if($tm.IsVM){' or follows the hypervisor'})" $desc
+            } else {
+                Add-Result 'AD' 'PDC Time Source' 'PASS' "PDC ($pdcFqdn) time source configured" $desc
+            }
+        } catch { Add-Result 'AD' 'PDC Time Source' 'INFO' "Could not read W32Time config on $pdcFqdn (remoting?): $_" }
+    }
 }
 
 # ======================================================================
@@ -495,26 +568,22 @@ if (Test-SectionEnabled 'DNS') {
 }
 
 # ======================================================================
-#  SECTION: CERT  (LDAPS + PKI + expiring DC certs)
+#  SECTION: CERT  (LDAPS + PKI + expiring DC certs + GPO hygiene)
 # ======================================================================
 if (Test-SectionEnabled 'CERT') {
     foreach ($dc in $DomainControllers) {
-        # LDAPS: real TLS handshake + served cert expiry
-        try {
-            $lc = Get-LdapsCertificate -HostName $dc
-            $days = [int][math]::Floor(($lc.NotAfter - (Get-Date)).TotalDays)
-            # DC certs from the Kerberos Authentication template have an empty Subject (SAN only).
-            $certName = if ($lc.Subject) { $lc.Subject } else { "SAN:" + $lc.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::DnsName, $false) }
-            $desc = "$certName expires $($lc.NotAfter.ToString('yyyy-MM-dd')) ($days d)"
-            if ($days -lt 0) {
-                Add-Result 'CERT' "LDAPS $dc" 'FAIL' "LDAPS cert EXPIRED: $desc" "Issuer: $($lc.Issuer)"
-            } elseif ($days -lt $CertExpiryWarnDays) {
-                Add-Result 'CERT' "LDAPS $dc" 'WARN' "LDAPS cert expires soon: $desc" "Issuer: $($lc.Issuer)"
-            } else {
-                Add-Result 'CERT' "LDAPS $dc" 'PASS' "TLS handshake OK, $desc" "Issuer: $($lc.Issuer)"
+        # LDAPS: real TLS handshake + served cert expiry (building block: Get-TlsCertificate)
+        $lc = & $Tool['Get-TlsCertificate.ps1'] -ComputerName $dc -Port 636 -WarnDays $CertExpiryWarnDays
+        if ($lc.Status -eq 'ERROR') {
+            Add-Result 'CERT' "LDAPS $dc" 'WARN' "No working LDAPS on ${dc}:636 (no usable cert, or blocked): $($lc.Error)"
+        } else {
+            $certName = if ($lc.Subject) { $lc.Subject } else { "SAN:$($lc.DnsName)" }
+            $desc = "$certName expires $($lc.NotAfter.ToString('yyyy-MM-dd')) ($($lc.DaysLeft) d)"
+            switch ($lc.Status) {
+                'EXPIRED' { Add-Result 'CERT' "LDAPS $dc" 'FAIL' "LDAPS cert EXPIRED: $desc" "Issuer: $($lc.Issuer)" }
+                'WARN'    { Add-Result 'CERT' "LDAPS $dc" 'WARN' "LDAPS cert expires soon: $desc" "Issuer: $($lc.Issuer)" }
+                default   { Add-Result 'CERT' "LDAPS $dc" 'PASS' "TLS handshake OK ($($lc.Protocol)), $desc" "Issuer: $($lc.Issuer)" }
             }
-        } catch {
-            Add-Result 'CERT' "LDAPS $dc" 'WARN' "No working LDAPS on ${dc}:636 (no usable cert, or blocked): $($_.Exception.InnerException.Message) $($_.Exception.Message)"
         }
 
         # Expiring machine certs (remote store read; best-effort)
@@ -562,6 +631,7 @@ if (Test-SectionEnabled 'CERT') {
     # Liveness: does each registered CA actually answer? Judged on certutil's exit code,
     # not its text, so it works on localized (e.g. Swedish) Windows.
     $deadCAs = [System.Collections.Generic.List[string]]::new()
+    $deadCANames = [System.Collections.Generic.List[string]]::new()
     $haveCertutil = [bool](Get-Command certutil.exe -ErrorAction SilentlyContinue)
     foreach ($ca in $registeredCAs) {
         $caHost = $ca.dNSHostName
@@ -571,13 +641,14 @@ if (Test-SectionEnabled 'CERT') {
             Add-Result 'CERT' "CA Liveness $caName" 'INFO' 'certutil.exe not available - liveness not tested'
             continue
         }
-        $tcp135  = Test-TcpPort -HostName $caHost -Port 135 -TimeoutMs 3000
+        $tcp135  = Test-PortOpen -HostName $caHost -Port 135
         $pingOut = & certutil.exe -ping -config "$caHost\$caName" 2>&1 | Out-String
         $pingRc  = $LASTEXITCODE
         if ($pingRc -eq 0) {
             Add-Result 'CERT' "CA Liveness $caName" 'PASS' "$caHost answers certutil -ping"
         } else {
             $deadCAs.Add("$caName ($caHost)")
+            $deadCANames.Add($caName)
             $reason = if (-not $tcp135) { 'no RPC/135 and -ping failed' } else { 'RPC reachable but -ping failed' }
             $last   = (($pingOut -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -Last 1)
             Add-Result 'CERT' "CA Liveness $caName" 'FAIL' "$caHost does NOT answer as a CA - $reason (exit $pingRc)" "$last"
@@ -588,16 +659,20 @@ if (Test-SectionEnabled 'CERT') {
     # Structured check on the Public Key policy node: EnrollCertificatesAutomatically=true,
     # in an enabled Computer/User half, in a GPO that has at least one enabled link.
     # (A plain 'AutoEnrollment' text match also hits GPOs that explicitly DISABLE it.)
+    # The same pass counts GPOs with no enabled link (hygiene).
     if ($SkipGpoScan) {
         Add-Result 'CERT' 'Autoenrollment GPOs' 'INFO' 'GPO scan skipped (-SkipGpoScan)'
     } else {
         try {
             Import-Module GroupPolicy -ErrorAction Stop
             $aeGpos = [System.Collections.Generic.List[string]]::new()
+            $noLinkGpos = [System.Collections.Generic.List[string]]::new()
             $aeUnlinked = 0
             foreach ($g in @(Get-GPO -All -Domain $Domain -ErrorAction Stop)) {
                 try {
                     [xml]$rep = Get-GPOReport -Guid $g.Id -ReportType Xml -Domain $Domain -ErrorAction Stop
+                    $links = @($rep.GPO.LinksTo | Where-Object { $_ -and $_.Enabled -eq 'true' } | ForEach-Object { $_.SOMPath })
+                    if ($links.Count -eq 0) { $noLinkGpos.Add($g.DisplayName) }
                     $sides = @()
                     foreach ($n in @($rep.SelectNodes("//*[local-name()='AutoEnrollmentSettings']"))) {
                         $on = $n.SelectSingleNode("*[local-name()='EnrollCertificatesAutomatically']")
@@ -608,7 +683,6 @@ if (Test-SectionEnabled 'CERT') {
                         }
                     }
                     if ($sides.Count -eq 0) { continue }
-                    $links = @($rep.GPO.LinksTo | Where-Object { $_ -and $_.Enabled -eq 'true' } | ForEach-Object { $_.SOMPath })
                     if ($links.Count -eq 0) { $aeUnlinked++; continue }
                     $aeGpos.Add("$($g.DisplayName) [$(($sides | Select-Object -Unique) -join '+'); links: $($links -join ', ')]")
                 } catch { Write-Log "GPO report failed for '$($g.DisplayName)': $_" -Level WARN }
@@ -627,6 +701,11 @@ if (Test-SectionEnabled 'CERT') {
             } else {
                 Add-Result 'CERT' 'Autoenrollment GPOs' 'PASS' "No linked GPO enables autoenrollment$unlinkedNote"
             }
+            if ($noLinkGpos.Count -gt 0) {
+                Add-Result 'CERT' 'Unlinked GPOs' 'INFO' "$($noLinkGpos.Count) GPO(s) have no enabled link - candidates for cleanup" (Join-First $noLinkGpos)
+            } else {
+                Add-Result 'CERT' 'Unlinked GPOs' 'PASS' 'Every GPO has at least one enabled link'
+            }
         } catch {
             Add-Result 'CERT' 'Autoenrollment GPOs' 'INFO' "Could not enumerate GPOs (GroupPolicy module / GPMC missing?): $_"
         }
@@ -644,8 +723,7 @@ if (Test-SectionEnabled 'CERT') {
                 Add-Result 'CERT' 'NTAuth Store' 'INFO' 'NTAuth store is empty (no enterprise-trusted CA issuer cert)'
             } else {
                 $ntLines = $ntCerts | ForEach-Object { "$($_.Subject) exp $($_.NotAfter.ToString('yyyy-MM-dd'))" }
-                $deadNames = @($deadCAs | ForEach-Object { ($_ -split ' \(')[0] })
-                $ntDead = @($ntCerts | Where-Object { $s = $_.Subject; @($deadNames | Where-Object { $s -match ('CN=' + [regex]::Escape($_) + '(,|$)') }).Count -gt 0 })
+                $ntDead = @($ntCerts | Where-Object { $s = $_.Subject; @($deadCANames | Where-Object { $s -match ('CN=' + [regex]::Escape($_) + '(,|$)') }).Count -gt 0 })
                 if ($ntDead.Count -gt 0) {
                     Add-Result 'CERT' 'NTAuth Store' 'WARN' "$($ntCerts.Count) cert(s) in NTAuth, $($ntDead.Count) belong to a dead CA" ($ntLines -join '; ')
                 } else {
@@ -654,59 +732,56 @@ if (Test-SectionEnabled 'CERT') {
             }
         } catch { Add-Result 'CERT' 'NTAuth Store' 'INFO' "Could not read NTAuthCertificates: $_" }
     }
+
+    # Optional: blast radius of each dead CA (building block: Get-CertBlastRadius)
+    if ($CertSweep) {
+        $sweepMatches = @($deadCANames | ForEach-Object { "CN=$_" })
+        if ($Config.DeadCAIssuerMatch) { $sweepMatches += $Config.DeadCAIssuerMatch }
+        $sweepMatches = @($sweepMatches | Where-Object { $_ } | Select-Object -Unique)
+        if ($sweepMatches.Count -eq 0) {
+            Add-Result 'CERT' 'Dead CA Blast Radius' 'PASS' 'No dead CA found and no DeadCAIssuerMatch configured - nothing to sweep'
+        }
+        foreach ($m in $sweepMatches) {
+            try {
+                $sw = @(& $Tool['Get-CertBlastRadius.ps1'] -IssuerMatch $m -LogRoot $LogRoot -ErrorAction Stop)
+                $hit   = @($sw | Where-Object { $_.Reachable -and $_.Subject })
+                $hosts = @($hit | ForEach-Object { $_.Computer } | Sort-Object -Unique)
+                $cli   = @($hit | Where-Object { $_.HasClientAuth -eq $true })
+                $unr   = @($sw | Where-Object { -not $_.Reachable })
+                $st    = if ($cli.Count -gt 0) { 'FAIL' } elseif ($hosts.Count -gt 0) { 'WARN' } else { 'PASS' }
+                Add-Result 'CERT' "Blast Radius $m" $st `
+                    "$($hosts.Count) host(s) hold $($hit.Count) cert(s) from it, $($cli.Count) client-auth capable, $($unr.Count) host(s) unreachable" `
+                    (Join-First $hosts)
+            } catch { Add-Result 'CERT' "Blast Radius $m" 'INFO' "Sweep failed: $_" }
+        }
+    }
 }
 
 # ======================================================================
-#  SECTION: USERS  (privileged risk + hygiene)
+#  SECTION: USERS  (privileged risk + hygiene + policy)
 # ======================================================================
+$privAccounts = @()      # shared with SECURITY
+$privSams = @{}
+if ((Test-SectionEnabled 'USERS') -or (Test-SectionEnabled 'SECURITY')) {
+    # Building block: Get-PrivilegedAccountRisk (groups by well-known SID, locale-independent)
+    $privErr = @()
+    try {
+        $privAccounts = @(& $Tool['Get-PrivilegedAccountRisk.ps1'] -Domain $Domain `
+            -KnownRiskAccounts @($Config.KnownRiskAccounts) -ServiceAcctRegex $Config.ServiceAcctRegex `
+            -NamedAdminRegex $Config.NamedAdminRegex -InactiveDays $InactiveDays `
+            -ErrorAction SilentlyContinue -ErrorVariable privErr)
+    } catch { $privErr += $_ }
+    foreach ($a in $privAccounts) { $privSams[$a.SamAccountName] = $a }
+}
+
 if (Test-SectionEnabled 'USERS') {
-    $auditGroups    = @('Domain Admins','Enterprise Admins','Schema Admins','Administrators','Backup Operators','Account Operators')
-    $highPrivGroups = @('Domain Admins','Enterprise Admins','Schema Admins')
-    $svcRegex       = $Config.ServiceAcctRegex
-    $namedAdminRegex = $Config.NamedAdminRegex
-    $knownRisk      = @($Config.KnownRiskAccounts)
-
-    $membershipMap = @{}
-    foreach ($g in $auditGroups) {
-        try {
-            $members = Get-ADGroupMember -Identity $g -Recursive -Server $Domain -ErrorAction Stop |
-                       Where-Object objectClass -eq 'user'
-            foreach ($m in $members) {
-                if (-not $membershipMap.ContainsKey($m.SamAccountName)) {
-                    $membershipMap[$m.SamAccountName] = [System.Collections.Generic.List[string]]::new()
-                }
-                if ($g -notin $membershipMap[$m.SamAccountName]) { $membershipMap[$m.SamAccountName].Add($g) }
-            }
-        } catch {
-            Write-Log "Could not query group '$g': $_" -Level WARN
-            Add-Result 'USERS' "Group $g" 'INFO' "Could not expand membership (foreign/orphaned members?): $_"
-        }
-    }
-
-    $high = 0; $review = 0; $ok = 0
-    $privDetail = [System.Collections.Generic.List[string]]::new()
-    foreach ($sam in ($membershipMap.Keys | Sort-Object)) {
-        try {
-            $u = Get-ADUser -Identity $sam -Server $Domain -Properties Enabled,LastLogonDate,PasswordNeverExpires,Description,DisplayName -ErrorAction Stop
-            $groups = $membershipMap[$sam]
-            $inHigh = @($groups | Where-Object { $_ -in $highPrivGroups }).Count -gt 0
-            $days   = if ($u.LastLogonDate) { (New-TimeSpan -Start $u.LastLogonDate -End (Get-Date)).Days } else { $null }
-
-            $risk = 'OK'; $reason = 'Active account, no risk flags'
-            if (-not $u.Enabled -and $inHigh)                { $risk='HIGH-RISK'; $reason='Disabled account in high-priv group' }
-            elseif ($u.SamAccountName -in $knownRisk)         { $risk='HIGH-RISK'; $reason='Known vendor/external account' }
-            elseif ($null -eq $u.LastLogonDate -and $inHigh)  { $risk='HIGH-RISK'; $reason='Never logged in and in high-priv group' }
-            elseif ($u.SamAccountName -match $svcRegex -and $inHigh) { $risk='HIGH-RISK'; $reason='Service-account name pattern in high-priv group' }
-            elseif ($null -ne $days -and $days -gt $InactiveDays -and $inHigh) { $risk='REVIEW'; $reason="Last logon $days days ago in high-priv group" }
-            elseif ($u.SamAccountName -match $namedAdminRegex -and $inHigh) { $risk='REVIEW'; $reason='Named admin account in high-priv group - verify still needed' }
-
-            switch ($risk) { 'HIGH-RISK'{$high++} 'REVIEW'{$review++} default{$ok++} }
-            if ($risk -ne 'OK') { $privDetail.Add("$sam [$risk]: $reason ($($groups -join '/'))") }
-        } catch { Write-Log "Could not read user '$sam': $_" -Level WARN }
-    }
-
-    $privStatus = if ($high -gt 0) {'FAIL'} elseif ($review -gt 0) {'WARN'} else {'PASS'}
-    Add-Result 'USERS' 'Privileged Accounts' $privStatus "HIGH-RISK=$high REVIEW=$review OK=$ok (total $($membershipMap.Count))" ($privDetail -join ' | ')
+    foreach ($e in $privErr) { Add-Result 'USERS' 'Privileged Group Expansion' 'INFO' "$e" }
+    $high   = @($privAccounts | Where-Object Risk -eq 'HIGH-RISK')
+    $review = @($privAccounts | Where-Object Risk -eq 'REVIEW')
+    $ok     = @($privAccounts | Where-Object Risk -eq 'OK')
+    $privDetail = @($privAccounts | Where-Object Risk -ne 'OK' | ForEach-Object { "$($_.SamAccountName) [$($_.Risk)]: $($_.Reason) ($($_.Groups -join '/'))" })
+    $privStatus = if ($high.Count -gt 0) {'FAIL'} elseif ($review.Count -gt 0) {'WARN'} else {'PASS'}
+    Add-Result 'USERS' 'Privileged Accounts' $privStatus "HIGH-RISK=$($high.Count) REVIEW=$($review.Count) OK=$($ok.Count) (total $($privAccounts.Count))" ($privDetail -join ' | ')
 
     # krbtgt password age
     try {
@@ -719,12 +794,35 @@ if (Test-SectionEnabled 'USERS') {
         }
     } catch { Add-Result 'USERS' 'krbtgt Password Age' 'INFO' "Could not read krbtgt: $_" }
 
+    # Default domain password policy
+    try {
+        $pol = Get-ADDefaultDomainPasswordPolicy -Server $Domain -ErrorAction Stop
+        $polIssues = [System.Collections.Generic.List[string]]::new()
+        if ($pol.LockoutThreshold -eq 0)            { $polIssues.Add('No account lockout threshold') }
+        elseif ($pol.LockoutThreshold -gt 10)       { $polIssues.Add("Lockout threshold $($pol.LockoutThreshold) - consider 10 or lower") }
+        if ($pol.MinPasswordLength -lt 12)          { $polIssues.Add("Min length $($pol.MinPasswordLength) - consider 12 or more") }
+        if (-not $pol.ComplexityEnabled)            { $polIssues.Add('Complexity not required') }
+        if ($pol.ReversibleEncryptionEnabled)       { $polIssues.Add('Reversible encryption ENABLED') }
+        $polInfo = "MinLen=$($pol.MinPasswordLength) MaxAge=$($pol.MaxPasswordAge.Days)d Complexity=$($pol.ComplexityEnabled) Lockout=$($pol.LockoutThreshold) History=$($pol.PasswordHistoryCount)"
+        if ($polIssues.Count -gt 0) {
+            $st = if ($pol.ReversibleEncryptionEnabled) { 'FAIL' } else { 'WARN' }
+            Add-Result 'USERS' 'Password Policy' $st ($polIssues -join '; ') $polInfo
+        } else {
+            Add-Result 'USERS' 'Password Policy' 'PASS' 'Default domain policy meets baseline' $polInfo
+        }
+        try {
+            $fgpp = @(Get-ADFineGrainedPasswordPolicy -Filter * -Server $Domain -ErrorAction Stop)
+            if ($fgpp.Count -gt 0) {
+                Add-Result 'USERS' 'Fine-Grained Policies' 'INFO' "$($fgpp.Count) fine-grained password polic(ies) also apply" (($fgpp | ForEach-Object { "$($_.Name) (prec $($_.Precedence), minlen $($_.MinPasswordLength))" }) -join '; ')
+            }
+        } catch { }
+    } catch { Add-Result 'USERS' 'Password Policy' 'INFO' "Could not read password policy: $_" }
+
     # Enabled users, password-never-expires (LDAP filter: server-side, no full pull)
-    $ldapEnabled = '(!(userAccountControl:1.2.840.113556.1.4.803:=2))'
     try {
         $pne = @(Get-ADUser -LDAPFilter "(&$ldapEnabled(userAccountControl:1.2.840.113556.1.4.803:=65536))" -Server $Domain -ErrorAction Stop)
         if ($pne.Count -gt 0) {
-            Add-Result 'USERS' 'Password Never Expires' 'WARN' "$($pne.Count) enabled user(s) with non-expiring passwords" (($pne | Select-Object -First 25 | ForEach-Object { $_.SamAccountName }) -join ', ')
+            Add-Result 'USERS' 'Password Never Expires' 'WARN' "$($pne.Count) enabled user(s) with non-expiring passwords" (Join-First ($pne | ForEach-Object { $_.SamAccountName }))
         } else {
             Add-Result 'USERS' 'Password Never Expires' 'PASS' 'No enabled users with non-expiring passwords'
         }
@@ -736,7 +834,7 @@ if (Test-SectionEnabled 'USERS') {
     try {
         $stale = @(Get-ADUser -LDAPFilter "(&$ldapEnabled(lastLogonTimestamp<=$cutFt))" -Server $Domain -ErrorAction Stop)
         if ($stale.Count -gt 0) {
-            Add-Result 'USERS' 'Stale Enabled Users' 'WARN' "$($stale.Count) enabled user(s) inactive > $InactiveDays days" (($stale | Select-Object -First 25 | ForEach-Object { $_.SamAccountName }) -join ', ')
+            Add-Result 'USERS' 'Stale Enabled Users' 'WARN' "$($stale.Count) enabled user(s) inactive > $InactiveDays days" (Join-First ($stale | ForEach-Object { $_.SamAccountName }))
         } else {
             Add-Result 'USERS' 'Stale Enabled Users' 'PASS' "No enabled users inactive > $InactiveDays days"
         }
@@ -745,24 +843,145 @@ if (Test-SectionEnabled 'USERS') {
     try {
         $staleC = @(Get-ADComputer -LDAPFilter "(&$ldapEnabled(lastLogonTimestamp<=$cutFt))" -Server $Domain -ErrorAction Stop)
         if ($staleC.Count -gt 0) {
-            Add-Result 'USERS' 'Stale Computer Accounts' 'WARN' "$($staleC.Count) computer(s) inactive > $InactiveDays days" (($staleC | Select-Object -First 25 | ForEach-Object { $_.Name }) -join ', ')
+            Add-Result 'USERS' 'Stale Computer Accounts' 'WARN' "$($staleC.Count) computer(s) inactive > $InactiveDays days" (Join-First ($staleC | ForEach-Object { $_.Name }))
         } else {
             Add-Result 'USERS' 'Stale Computer Accounts' 'PASS' "No computers inactive > $InactiveDays days"
         }
     } catch { Add-Result 'USERS' 'Stale Computer Accounts' 'INFO' "Query failed: $_" }
+
+    # AdminSDHolder orphans - enabled users with adminCount=1 that are no longer in any
+    # protected group. They keep the hardened AdminSDHolder ACL (inheritance off), which
+    # breaks delegated administration of those accounts.
+    if ($privErr.Count -gt 0) {
+        Add-Result 'USERS' 'AdminSDHolder Orphans' 'INFO' 'Skipped - privileged group expansion was incomplete (see above), orphans cannot be told apart'
+    } else {
+        try {
+            $ac = @(Get-ADUser -LDAPFilter "(&(adminCount=1)$ldapEnabled)" -Server $Domain -ErrorAction Stop)
+            $orphans = @($ac | Where-Object { -not $privSams.ContainsKey($_.SamAccountName) })
+            if ($orphans.Count -gt 0) {
+                Add-Result 'USERS' 'AdminSDHolder Orphans' 'WARN' "$($orphans.Count) enabled user(s) with adminCount=1 but in no protected group - ACL inheritance still blocked" (Join-First ($orphans | ForEach-Object { $_.SamAccountName }))
+            } else {
+                Add-Result 'USERS' 'AdminSDHolder Orphans' 'PASS' 'No adminCount=1 orphans'
+            }
+        } catch { Add-Result 'USERS' 'AdminSDHolder Orphans' 'INFO' "Query failed: $_" }
+    }
+
+    # AS-REP roastable - Kerberos pre-authentication disabled (UAC 0x400000)
+    try {
+        $asrep = @(Get-ADUser -LDAPFilter "(&$ldapEnabled(userAccountControl:1.2.840.113556.1.4.803:=4194304))" -Server $Domain -ErrorAction Stop)
+        if ($asrep.Count -gt 0) {
+            $asPriv = @($asrep | Where-Object { $privSams.ContainsKey($_.SamAccountName) })
+            $st = if ($asPriv.Count -gt 0) { 'FAIL' } else { 'WARN' }
+            Add-Result 'USERS' 'AS-REP Roastable' $st "$($asrep.Count) enabled account(s) without Kerberos pre-auth - hash crackable offline$(if($asPriv.Count){", $($asPriv.Count) privileged"})" (Join-First ($asrep | ForEach-Object { $_.SamAccountName }))
+        } else {
+            Add-Result 'USERS' 'AS-REP Roastable' 'PASS' 'No enabled accounts with pre-auth disabled'
+        }
+    } catch { Add-Result 'USERS' 'AS-REP Roastable' 'INFO' "Query failed: $_" }
+
+    # Protected Users (well-known RID 525)
+    try {
+        $domSid = (Get-ADDomain -Server $Domain -ErrorAction Stop).DomainSID.Value
+        $pu = @(Get-ADGroupMember -Identity "$domSid-525" -Recursive -Server $Domain -ErrorAction Stop | Where-Object objectClass -eq 'user')
+        $highPriv = @($privAccounts | Where-Object { $_.InHighPriv -and $_.Enabled })
+        $notIn = @($highPriv | Where-Object { $_.SamAccountName -notin @($pu.SamAccountName) })
+        Add-Result 'USERS' 'Protected Users' 'INFO' "$($pu.Count) user(s) in Protected Users; $($notIn.Count) of $($highPriv.Count) enabled high-priv admin(s) are not" (Join-First ($notIn | ForEach-Object { $_.SamAccountName }))
+    } catch { Add-Result 'USERS' 'Protected Users' 'INFO' "Could not read Protected Users: $_" }
+}
+
+# ======================================================================
+#  SECTION: SECURITY  (delegation, SPNs, LAPS, Kerberoasting)
+# ======================================================================
+if (Test-SectionEnabled 'SECURITY') {
+    # Unconstrained delegation (UAC 0x80000 TRUSTED_FOR_DELEGATION). DCs have it by design
+    # (primaryGroupID 516 = DCs, 521 = RODCs); anything else can impersonate any user that
+    # authenticates to it.
+    try {
+        $udC = @(Get-ADComputer -LDAPFilter "(&$ldapEnabled(userAccountControl:1.2.840.113556.1.4.803:=524288)(!(primaryGroupID=516))(!(primaryGroupID=521)))" -Server $Domain -ErrorAction Stop)
+        $udU = @(Get-ADUser     -LDAPFilter "(&$ldapEnabled(userAccountControl:1.2.840.113556.1.4.803:=524288))" -Server $Domain -ErrorAction Stop)
+        if (($udC.Count + $udU.Count) -gt 0) {
+            $d = @()
+            if ($udC.Count) { $d += 'Computers: ' + (Join-First ($udC | ForEach-Object { $_.Name })) }
+            if ($udU.Count) { $d += 'Users: '     + (Join-First ($udU | ForEach-Object { $_.SamAccountName })) }
+            Add-Result 'SECURITY' 'Unconstrained Delegation' 'WARN' "$($udC.Count + $udU.Count) non-DC object(s) trusted for unconstrained delegation" ($d -join ' | ')
+        } else {
+            Add-Result 'SECURITY' 'Unconstrained Delegation' 'PASS' 'Only DCs have unconstrained delegation'
+        }
+    } catch { Add-Result 'SECURITY' 'Unconstrained Delegation' 'INFO' "Query failed: $_" }
+
+    # Duplicate SPNs (cause KDC_ERR_S_PRINCIPAL_UNKNOWN / Kerberos fallback to NTLM).
+    # Grouped in PowerShell instead of parsing 'setspn -X' text (localized). Domain scope.
+    try {
+        $spnOwners = @{}
+        foreach ($o in @(Get-ADObject -LDAPFilter '(servicePrincipalName=*)' -Server $Domain -Properties servicePrincipalName,sAMAccountName -ResultPageSize 1000 -ErrorAction Stop)) {
+            foreach ($s in @($o.servicePrincipalName)) {
+                $k = "$s".ToLowerInvariant()
+                if (-not $spnOwners.ContainsKey($k)) { $spnOwners[$k] = [System.Collections.Generic.List[string]]::new() }
+                $spnOwners[$k].Add($o.sAMAccountName)
+            }
+        }
+        $dups = @($spnOwners.GetEnumerator() | Where-Object { @($_.Value | Select-Object -Unique).Count -gt 1 })
+        if ($dups.Count -gt 0) {
+            Add-Result 'SECURITY' 'Duplicate SPNs' 'WARN' "$($dups.Count) SPN(s) registered on more than one account - Kerberos fails for them" (Join-First ($dups | ForEach-Object { "$($_.Key) -> $((@($_.Value | Select-Object -Unique)) -join '+')" }) 10 ' | ')
+        } else {
+            Add-Result 'SECURITY' 'Duplicate SPNs' 'PASS' "No duplicate SPNs ($($spnOwners.Count) SPNs checked)"
+        }
+    } catch { Add-Result 'SECURITY' 'Duplicate SPNs' 'INFO' "Query failed: $_" }
+
+    # LAPS: schema (Windows LAPS msLAPS-* or legacy ms-Mcs-AdmPwd*) + coverage on member computers.
+    try {
+        $schemaNC = (Get-ADRootDSE -Server $Domain).schemaNamingContext
+        $hasWin    = [bool](Get-ADObject -SearchBase $schemaNC -LDAPFilter '(lDAPDisplayName=msLAPS-PasswordExpirationTime)' -Server $Domain -ErrorAction Stop)
+        $hasLegacy = [bool](Get-ADObject -SearchBase $schemaNC -LDAPFilter '(lDAPDisplayName=ms-Mcs-AdmPwdExpirationTime)' -Server $Domain -ErrorAction Stop)
+        if (-not $hasWin -and -not $hasLegacy) {
+            Add-Result 'SECURITY' 'LAPS' 'WARN' 'No LAPS schema (Windows LAPS or legacy) - local admin passwords are not managed'
+        } else {
+            $attrs = @()
+            if ($hasWin)    { $attrs += 'msLAPS-PasswordExpirationTime' }
+            if ($hasLegacy) { $attrs += 'ms-Mcs-AdmPwdExpirationTime' }
+            $members = @(Get-ADComputer -LDAPFilter "(&$ldapEnabled(!(primaryGroupID=516))(!(primaryGroupID=521)))" -Server $Domain -Properties $attrs -ErrorAction Stop)
+            $covered = @($members | Where-Object { $c = $_; @($attrs | Where-Object { $c.$_ }).Count -gt 0 })
+            $kind = (@(if ($hasWin) { 'Windows LAPS' }; if ($hasLegacy) { 'legacy LAPS' }) -join ' + ')
+            if ($members.Count -eq 0) {
+                Add-Result 'SECURITY' 'LAPS' 'INFO' "$kind schema present; no enabled member computers"
+            } else {
+                $pct = [int](100 * $covered.Count / $members.Count)
+                $st  = if ($pct -ge 90) { 'PASS' } elseif ($pct -ge 50) { 'WARN' } else { 'FAIL' }
+                $uncovered = @($members | Where-Object { $_.Name -notin @($covered.Name) } | ForEach-Object { $_.Name })
+                Add-Result 'SECURITY' 'LAPS' $st "$kind schema present; $($covered.Count)/$($members.Count) member computers ($pct%) have a LAPS password" (Join-First $uncovered)
+            }
+        }
+    } catch { Add-Result 'SECURITY' 'LAPS' 'INFO' "Could not check LAPS: $_" }
+
+    # Kerberoastable: enabled USER accounts with an SPN (krbtgt excluded). A service ticket
+    # for them can be requested by any user and cracked offline - worst when privileged.
+    try {
+        $kerb = @(Get-ADUser -LDAPFilter "(&$ldapEnabled(servicePrincipalName=*)(!(sAMAccountName=krbtgt)))" -Server $Domain -Properties PasswordLastSet -ErrorAction Stop)
+        if ($kerb.Count -gt 0) {
+            $kPriv = @($kerb | Where-Object { $privSams.ContainsKey($_.SamAccountName) })
+            $st = if ($kPriv.Count -gt 0) { 'FAIL' } else { 'WARN' }
+            $lines = $kerb | ForEach-Object {
+                $age = if ($_.PasswordLastSet) { [int]((Get-Date) - $_.PasswordLastSet).TotalDays } else { '?' }
+                "$($_.SamAccountName)$(if($privSams.ContainsKey($_.SamAccountName)){' [PRIVILEGED]'}) pwdAge=${age}d"
+            }
+            Add-Result 'SECURITY' 'Kerberoastable Accounts' $st "$($kerb.Count) enabled user(s) with an SPN$(if($kPriv.Count){", $($kPriv.Count) privileged"}) - use gMSA or long random passwords" (Join-First $lines)
+        } else {
+            Add-Result 'SECURITY' 'Kerberoastable Accounts' 'PASS' 'No enabled user accounts with SPNs'
+        }
+    } catch { Add-Result 'SECURITY' 'Kerberoastable Accounts' 'INFO' "Query failed: $_" }
 }
 
 # ======================================================================
 #  SECTION: NET  (DC port reachability + unsigned LDAP binds)
 # ======================================================================
 if (Test-SectionEnabled 'NET') {
-    $portMap = [ordered]@{ 'LDAP 389'=389; 'LDAPS 636'=636; 'Kerberos 88'=88; 'GC 3268'=3268; 'DNS 53'=53; 'SMB 445'=445 }
+    # Building block: Test-TcpPort
+    # Plain hashtable on purpose: an [ordered] dictionary indexed with an [int] key indexes by POSITION.
+    $corePorts = @(389, 636, 88, 3268, 53, 445)
+    $portName  = @{ 389='LDAP 389'; 636='LDAPS 636'; 88='Kerberos 88'; 3268='GC 3268'; 53='DNS 53'; 445='SMB 445' }
     foreach ($dc in $DomainControllers) {
-        $open = [System.Collections.Generic.List[string]]::new()
-        $shut = [System.Collections.Generic.List[string]]::new()
-        foreach ($p in $portMap.GetEnumerator()) {
-            if (Test-TcpPort -HostName $dc -Port $p.Value) { $open.Add($p.Key) } else { $shut.Add($p.Key) }
-        }
+        $probe = @(& $Tool['Test-TcpPort.ps1'] -ComputerName $dc -Port $corePorts)
+        $open = @($probe | Where-Object Open      | ForEach-Object { $portName[[int]$_.Port] })
+        $shut = @($probe | Where-Object { -not $_.Open } | ForEach-Object { $portName[[int]$_.Port] })
         if ($shut.Count -eq 0) {
             Add-Result 'NET' "DC Ports $dc" 'PASS' 'All core AD ports reachable' ("open: " + ($open -join ', '))
         } else {
@@ -772,48 +991,24 @@ if (Test-SectionEnabled 'NET') {
 
     # Stale IPs still answering LDAP
     foreach ($ip in @($Config.StaleIPs | Where-Object { $_ })) {
-        if (Test-TcpPort -HostName $ip -Port 389) {
+        if (Test-PortOpen -HostName $ip -Port 389) {
             Add-Result 'NET' "Stale LDAP $ip" 'WARN' "$ip still answers on 389 - expected decommissioned"
         } else {
             Add-Result 'NET' "Stale LDAP $ip" 'PASS' "$ip does not answer on 389"
         }
     }
 
-    # Unsigned / simple LDAP binds. 2889 (per-client) is only logged when
-    # "16 LDAP Interface Events" >= 2; 2887 (daily count) is always logged.
-    foreach ($dc in $DomainControllers) {
-        try {
-            $r = Invoke-Command -ComputerName $dc -ArgumentList $EventHoursBack -ErrorAction Stop -ScriptBlock {
-                param($Hours)
-                $start = (Get-Date).AddHours(-1 * $Hours)
-                $lvl = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Diagnostics' -ErrorAction SilentlyContinue).'16 LDAP Interface Events'
-                $out = [ordered]@{ Level = [int]$lvl; Clients = @(); Count2887 = 0; Error = '' }
-                try {
-                    $out.Clients = @(Get-WinEvent -FilterHashtable @{ LogName='Directory Service'; Id=2889; StartTime=$start } -ErrorAction Stop |
-                        ForEach-Object {
-                            $ep = [string]$_.Properties[0].Value           # "ip:port" or "[v6]:port"
-                            $i  = $ep.LastIndexOf(':')
-                            if ($i -gt 0) { $ep.Substring(0, $i).Trim('[',']') } else { $ep }
-                        } | Sort-Object -Unique)
-                } catch { if ("$($_.FullyQualifiedErrorId)" -notmatch 'NoMatchingEventsFound') { $out.Error = "$_" } }
-                try {
-                    $out.Count2887 = @(Get-WinEvent -FilterHashtable @{ LogName='Directory Service'; Id=2887; StartTime=$start } -ErrorAction Stop).Count
-                } catch { if ("$($_.FullyQualifiedErrorId)" -notmatch 'NoMatchingEventsFound' -and -not $out.Error) { $out.Error = "$_" } }
-                [PSCustomObject]$out
+    # Unsigned / simple LDAP binds (building block: Get-UnsignedLdapClient)
+    if ($DomainControllers.Count -gt 0) {
+        foreach ($r in @(& $Tool['Get-UnsignedLdapClient.ps1'] -ComputerName $DomainControllers -HoursBack $EventHoursBack)) {
+            $dc = $r.ComputerName
+            switch ($r.Status) {
+                'ERROR'           { Add-Result 'NET' "Unsigned LDAP $dc" 'INFO' "Could not read Directory Service log on ${dc}: $($r.Error)" }
+                'UNSIGNED'        { Add-Result 'NET' "Unsigned LDAP $dc" 'WARN' "$($r.ClientCount) client(s) doing unsigned/simple binds (last ${EventHoursBack}h)" (@($r.Clients) -join ', ') }
+                'UNKNOWN-CLIENTS' { Add-Result 'NET' "Unsigned LDAP $dc" 'WARN' "Event 2887 reports $($r.Count2887) unsigned bind(s), but per-client 2889 logging is off (level $($r.LoggingLevel)) - set '16 LDAP Interface Events'=2 to see who" }
+                'CLEAN-2887-ONLY' { Add-Result 'NET' "Unsigned LDAP $dc" 'PASS' "No 2887 in last ${EventHoursBack}h (2887 is daily; 2889 logging off, level $($r.LoggingLevel))" }
+                default           { Add-Result 'NET' "Unsigned LDAP $dc" 'PASS' "No Event 2889/2887 in last ${EventHoursBack}h" }
             }
-            if ($r.Error) {
-                Add-Result 'NET' "Unsigned LDAP $dc" 'INFO' "Could not read Directory Service log on ${dc}: $($r.Error)"
-            } elseif (@($r.Clients).Count -gt 0) {
-                Add-Result 'NET' "Unsigned LDAP $dc" 'WARN' "$(@($r.Clients).Count) client(s) doing unsigned/simple binds (last ${EventHoursBack}h)" (@($r.Clients) -join ', ')
-            } elseif ($r.Count2887 -gt 0) {
-                Add-Result 'NET' "Unsigned LDAP $dc" 'WARN' "Event 2887 reports unsigned binds, but per-client 2889 logging is off (level $($r.Level)) - set '16 LDAP Interface Events'=2 to see who"
-            } elseif ($r.Level -lt 2) {
-                Add-Result 'NET' "Unsigned LDAP $dc" 'PASS' "No 2887 in last ${EventHoursBack}h (2887 is daily; 2889 logging off, level $($r.Level))"
-            } else {
-                Add-Result 'NET' "Unsigned LDAP $dc" 'PASS' "No Event 2889/2887 in last ${EventHoursBack}h"
-            }
-        } catch {
-            Add-Result 'NET' "Unsigned LDAP $dc" 'INFO' "Could not query ${dc} (remoting blocked?): $_"
         }
     }
 }

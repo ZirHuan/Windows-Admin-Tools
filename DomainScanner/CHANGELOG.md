@@ -11,6 +11,52 @@ the returned object - so every report says which build produced it.
 
 ## Invoke-DomainHealthAudit.ps1
 
+### [1.2.0] - 2026-11-19
+
+The repo had two diverged copies of this script: `DomainScanner/` (1.1.0, with the
+review fixes) and `AD/Inventering/` (based on the buggy 1.0.0 seed, with extra checks).
+1.2.0 is 1.1.0 plus those extra checks, rewritten; `AD/Inventering/` is removed.
+
+#### Added
+- **SECURITY section**: unconstrained Kerberos delegation (DCs excluded by primaryGroupID),
+  duplicate SPNs (grouped in PowerShell - `setspn -X` text is localized), LAPS schema +
+  coverage on member computers (Windows LAPS and legacy), Kerberoastable user accounts
+  (FAIL when privileged).
+- **USERS**: default password policy (+ fine-grained policies listed), AdminSDHolder
+  orphans (adminCount=1 outside every protected group), AS-REP roastable accounts,
+  Protected Users coverage of the high-privilege admins.
+- **AD**: PDC emulator time source, read from the W32Time registry + service state (the
+  `AD/Inventering` version matched the English word "error" in `w32tm` output).
+- **CERT**: GPOs with no enabled link (counted in the existing GPO pass, so no extra
+  report calls); `-CertSweep` runs `Get-CertBlastRadius.ps1` for every dead CA and for
+  config `DeadCAIssuerMatch`, which the audit now reads.
+- Config: the old `AdminAcctRegex` key is still accepted as `NamedAdminRegex`.
+
+#### Changed
+- **Building blocks.** Parts that are useful alone are separate scripts, called here:
+  `AD/Get-FsmoRoleHolder.ps1`, `AD/Get-PrivilegedAccountRisk.ps1`,
+  `AD/Get-UnsignedLdapClient.ps1`, `Network/Test-TcpPort.ps1`,
+  `Network/Get-TlsCertificate.ps1`. They are looked up next to the script, then in the
+  sibling folders; only those needed by the sections that run are required, and a
+  missing one stops the run with a list (or `-Skip` the sections).
+- **Privileged groups are looked up by well-known SID**, not by English name - a DC
+  installed in Swedish names Domain Admins "Domanadministratorer", and the name lookup
+  failed there. Server Operators, Print Operators, Replicator, Key Admins and Enterprise
+  Key Admins are now expanded too (they are AdminSDHolder-protected).
+- New checks use server-side LDAP filters (userAccountControl bits) instead of pulling
+  every user/computer to the client.
+- Long lists in the Extra column are capped at 25 with "(+N more)".
+- Password policy is WARN, FAIL only for reversible encryption (Windows' default minimum
+  length 7 would otherwise make nearly every domain FAIL).
+
+#### Fixed
+- 2887 now reports the number of unsigned binds (both counters in the event), not the
+  number of 2887 events.
+
+#### Tested
+Lab domain, Windows PowerShell 5.1.20348 as domain admin, with seeded test data - see
+README "Testat (1.2.0)". Parse 0 errors on PS 5.1 and PS 7.4.
+
 ### [1.1.0] - 2026-09-28
 
 Reviewed and test-run in an isolated lab domain
@@ -60,7 +106,7 @@ Reviewed and test-run in an isolated lab domain
 #### Changed
 - Stale users/computers and password-never-expires use server-side LDAP filters
   instead of pulling every account.
-- Config key `IverAdminRegex` renamed to `NamedAdminRegex` (default
+- The customer-specific admin-name config key renamed to `NamedAdminRegex` (default
   `^(adm[-_.]|admin[-_.])`). **Breaking** for configs using the old key.
 - All customer-specific names, hosts and defaults removed; author/company lines dropped.
 - Functions renamed to approved verbs: `Should-Run` -> `Test-SectionEnabled`,

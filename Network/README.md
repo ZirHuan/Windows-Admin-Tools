@@ -1,18 +1,28 @@
 # Network tools
 
-Two PowerShell scripts for finding out **where** a bad connection goes wrong: on the
-Wi-Fi link, on the LAN, in the router, or out at the ISP. Both run on Windows
-PowerShell 5.1 and PowerShell 7, need no admin rights and no extra modules, and write
-CSV files that open directly in Excel.
+PowerShell tools for finding out **where** a bad connection goes wrong: on the Wi-Fi
+link, on the LAN, in the router, or out at the ISP - plus small building blocks for port
+and certificate checks. All run on Windows PowerShell 5.1 and PowerShell 7, need no admin
+rights and no extra modules, and write CSV files that open directly in Excel.
+
+**Copy the whole `Network` folder** - the scripts share `NetProbe.Engine.ps1`.
 
 | Script | Use it when | Measures |
 |---|---|---|
 | [`Test-WifiConnection.ps1`](Test-WifiConnection.ps1) | You need a sharp, per-NIC picture: which adapter spikes, does it follow roaming or weak signal, what speed does each NIC really get | Latency to gateway + internet **per NIC** every second, Wi-Fi SSID/BSSID/signal/channel, speed test per NIC |
 | [`Watch-ConnectionQuality.ps1`](Watch-ConnectionQuality.ps1) | You want a light, long-running monitor (hours to days) with an event log of outages | Latency, jitter and loss per target every 10 s, OK/DEGRADED/DOWN events, speed test per NIC |
+| [`Invoke-NicSpeedTest.ps1`](Invoke-NicSpeedTest.ps1) | You only want download/upload per NIC, once, as objects or CSV | Speed test per NIC (+ Wi-Fi signal/BSSID) |
+| [`Test-TcpPort.ps1`](Test-TcpPort.ps1) | Is a TCP port open on these hosts? | TCP connect per host+port; DNS errors reported separately |
+| [`Get-TlsCertificate.ps1`](Get-TlsCertificate.ps1) | Which certificate does this TLS service present, and when does it expire? | TLS handshake on any port (443, LDAPS 636, ...) |
+
+`NetProbe.Engine.ps1` is not run on its own: it holds the ICMP and speed-test engine
+(C#), NIC selection and the `netsh wlan` parser that the first three scripts share.
+`Test-TcpPort.ps1` and `Get-TlsCertificate.ps1` are also used by
+`DomainScanner/Invoke-DomainHealthAudit.ps1` and `AD/Manage-FSMORoles.ps1`.
 
 Changes and test results: [CHANGELOG.md](CHANGELOG.md).
 
-## How the speed test works (both scripts)
+## How the speed test works (all three speed-test scripts)
 
 - Download and upload over HTTPS against `speed.cloudflare.com` (`-SpeedTestHost`
   takes any server with Cloudflare-compatible `/__down` and `/__up` endpoints).
@@ -33,24 +43,27 @@ Changes and test results: [CHANGELOG.md](CHANGELOG.md).
 
 ### Quick speed test only
 
+`Invoke-NicSpeedTest.ps1` does this and returns objects; `Test-WifiConnection.ps1
+-SpeedTestOnly` still works and calls it.
+
 ```powershell
 # All active NICs, once, then exit. No latency logging. ~16 s per NIC.
-.\Test-WifiConnection.ps1 -SpeedTestOnly
+.\Invoke-NicSpeedTest.ps1
+.\Test-WifiConnection.ps1 -SpeedTestOnly      # same, writes Desktop\netspeed-<date>.csv
 
-# Only the Wi-Fi adapters, longer measurement for a steadier figure
-.\Test-WifiConnection.ps1 -SpeedTestOnly -AdapterName 'Wi-Fi*' -SpeedTestSec 15
+# Only the Wi-Fi adapters, longer measurement for a steadier figure, to CSV
+.\Invoke-NicSpeedTest.ps1 -AdapterName 'Wi-Fi*' -SpeedTestSec 15 -CsvPath .\speed.csv
+
+# Just the numbers
+.\Invoke-NicSpeedTest.ps1 -Quiet | Select-Object Adapter, DownMbps, UpMbps, Signal
 ```
 
-Example output:
+Example output (`-SpeedTestOnly`):
 
 ```
-=== Hastighet (Mbit/s) ===
-
-Kort       Typ          Kalla         Lank    Ned   Upp   Signal Status
-----       ---          -----         ----    ---   ---   ------ ------
-Ethernet 3 Kabel/ovrigt 192.168.2.193 1 Gbps  231.3 221.8        ok
-Ethernet   Kabel/ovrigt 192.168.2.141 10 Gbps 48.1  19           ok
-
+Invoke-NicSpeedTest v1.0.0: speed.cloudflare.com, 8 s ned + 8 s upp per kort, 4 strommar, 2 kort ett i taget (ca 36 s)
+13:45:21  [Ethernet 3] ned 231.3 Mbit/s  upp 221.8 Mbit/s  (230.1 + 221.0 MB)
+13:45:39  [Ethernet] ned 48.1 Mbit/s  upp 19 Mbit/s  (48.0 + 19.1 MB)
 Sparat: C:\Users\me\Desktop\netspeed-20261104-134537.csv
 ```
 
