@@ -4,7 +4,52 @@ Format based on [Keep a Changelog](https://keepachangelog.com/). Tags:
 `wifi-connection-vX.Y.Z` (Test-WifiConnection) and `watch-connection-quality-vX.Y.Z`
 (Watch-ConnectionQuality). Usage and examples: [README.md](README.md).
 
+## 2026-11-19 - shared engine and building blocks
+
+The 297-line C# engine (ICMP prober + per-NIC speed test) and the NIC selection were
+exact copies in `Test-WifiConnection.ps1` and `Watch-ConnectionQuality.ps1` ("change
+both together"). They now live once in `NetProbe.Engine.ps1`, dot-sourced by both and by
+the new `Invoke-NicSpeedTest.ps1`. **Copy the whole folder** when deploying.
+
+### NetProbe.Engine.ps1 1.0.0 - 2026-11-19
+- New shared file: `[NetConnProbeV1]`, `[SpeedTestV1]` (C# moved byte-for-byte, no
+  functional change), `Get-NetProbeNic`, `ConvertFrom-NetshWlan`, `Get-WlanSnapshot`.
+
+### Invoke-NicSpeedTest.ps1 1.0.0 - 2026-11-19
+- New tool: the speed-test-only mode as a script of its own. One object per NIC
+  (English property names, same as `Watch-ConnectionQuality`'s speed CSV, plus Wi-Fi
+  `Signal`/`BSSID`), optional `-CsvPath`, `-Quiet`.
+
+### Test-TcpPort.ps1 1.0.0 - 2026-11-19
+- New tool, replaces `Test-OpenPorts.ps1` (repo root: one host, fixed list,
+  `Test-NetConnection`, text output, and a hard-coded customer IP as default).
+- Many hosts x many ports, pipeline input, objects out. A refused port is closed (the
+  connect is confirmed with `EndConnect()`); a name that does not resolve is reported
+  as `DNS: ...` instead of looking like a closed port.
+
+### Get-TlsCertificate.ps1 1.0.0 - 2026-11-19
+- New tool: TLS handshake on any host:port, returns the presented certificate with
+  days left and status OK / WARN / EXPIRED / ERROR. Validation is not enforced, so
+  self-signed and expired certs are still reported.
+
+### Tested 2026-11-19
+Windows Server 2022, Windows PowerShell 5.1.20348, dual-homed lab VM (one NIC with a
+gateway, one without): NIC without gateway skipped with its reason; `Invoke-NicSpeedTest`
+237/241 Mbit/s, `Test-WifiConnection -SpeedTestOnly` 241.5/237.5,
+`Watch-ConnectionQuality` background test 242.8/236.1 (line ~240); a host name that
+does not resolve gives a clean `DNS:` error in all three. Latency loop 15 s and CSVs OK.
+`Test-TcpPort` / `Get-TlsCertificate` unit-tested on PS 5.1 and PS 7.4 (open, refused,
+DNS failure, pipeline, LDAPS on a DC). No Wi-Fi adapter in this test.
+
 ## Test-WifiConnection.ps1
+
+### 1.2.0 - 2026-11-19
+
+- The C# engine, NIC selection and `netsh wlan` parser moved to `NetProbe.Engine.ps1`.
+- `-SpeedTestOnly` now calls `Invoke-NicSpeedTest.ps1`. Its CSV columns are English
+  (`Timestamp;Computer;Adapter;Type;SourceIP;...`) instead of `Tid;Adapter;Typ;...` -
+  update anything that parses the old speed-only CSV. The latency CSV is unchanged.
+- 998 -> 594 lines; no change to the latency measurement.
 
 ### 1.1.0 - 2026-11-04
 
@@ -66,7 +111,39 @@ Cloudflare limits seen in testing: HTTP 403 for >= 100 MB per request (script us
 The Wi-Fi fields are verified only against sample `netsh` output - not yet
 against a real wireless adapter.
 
-## Watch-ConnectionQuality.ps1 (repository root)
+## Watch-ConnectionQuality.ps1
+
+### 1.3.1 - 2026-11-19
+
+- The C# engine and NIC selection moved to `NetProbe.Engine.ps1` (same folder) instead
+  of a copy inside the script. No functional change; output and CSVs are identical.
+
+### 1.3.0 - 2026-11-10
+
+- **Moved** from the repository root to `Network/` (next to Test-WifiConnection).
+- **`-SpeedTestProvider Cloudflare|Ookla`** (default `Cloudflare`, unchanged). `Ookla`
+  runs the official Speedtest CLI (`speedtest.exe`, `winget install Ookla.Speedtest.CLI`)
+  once per NIC, bound to the NIC with `--ip`, in the background while pings continue.
+  `-OoklaPath` points at the exe (otherwise PATH, the WinGet package folder and the
+  script folder are searched, and the exe must report itself as Ookla's);
+  `-OoklaServerId` pins a server. 120 s timeout per NIC. If Ookla reports a different
+  internal IP than the NIC's, the row is marked ERROR.
+- Speed CSV gets `Provider` and `ResultUrl` columns; `Server` holds the Ookla server.
+- On stop (duration end or Ctrl+C) the paths of the saved files are printed.
+- **Fix: a locked CSV no longer ends the run early.** In 1.2.0 every CSV write used
+  `-ErrorAction Stop`, so opening the live CSV in Excel (which locks it) made the next
+  write fail and the whole run stop long before `-DurationHours`. Rows now wait in
+  memory and are written when the file is free again (warning logged once); if it is
+  still locked at stop they go to `<name>_ej-sparat_<HHmmss>.csv` next to it.
+  Event-log write errors only warn.
+- The wait between samples never runs past the end time. When the duration ends
+  during an Ookla run, only the NIC being tested is finished; the rest are skipped.
+
+Tested: PowerShell parser (0 errors), pure ASCII + BOM. Lock handling run in pwsh 7
+(Linux container, file made read-only mid-run): 22/22 rows kept and duration held
+(0.012 h = 43 s); locked-at-stop case wrote all 9 rows (2 + 7 in the fallback file).
+Ookla JSON fields checked
+against a real run of Speedtest CLI 1.2.0.84 on Linux. **Not yet run on Windows.**
 
 ### 1.2.0 - 2026-11-04
 

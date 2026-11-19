@@ -1,0 +1,12 @@
+{
+  "KnownRiskAccounts": ["vendor-support", "old.consultant"],
+  "ExpectedSites": ["Site-HQ"],
+  "StaleDCNames": ["OLD-DC01", "OLD-DC02"],
+  "StaleIPs": ["192.0.2.10"],
+  "ExpectedFsmoHolder": "dc01",
+  "DeadCAHostname": "oldca.contoso.local",
+  "DeadCAIssuerMatch": "CN=Contoso-Old-CA, DC=contoso, DC=local",
+  "ServiceAcctRegex": "^(svc[-_]|sa[-_]|sql|exchange|iis|backup|print|scan|service|mssql)",
+  "NamedAdminRegex": "^(adm[-_.]|admin[-_.])",
+  "Skip": []
+}

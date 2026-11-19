@@ -15,6 +15,13 @@
     .\Get-CADeletionAudit.ps1 -Customer contoso
 .EXAMPLE
     .\Get-CADeletionAudit.ps1 -TenantId "00000000-0000-0000-0000-000000000000"
+.NOTES
+    Version : 1.1.0
+    Building block: Resolve-M365Customer.ps1 (same folder) - customers.json lookup.
+    Changelog:
+      1.1.0  2026-11-19  Profile lookup via Resolve-M365Customer.ps1. -TenantId may now
+                         also be a profile ShortName or PrimaryDomain.
+      1.0.0              First version.
 #>
 
 [CmdletBinding()]
@@ -23,21 +30,13 @@ param(
     [string]$TenantId
 )
 
-# ── Resolve TenantId from customer profile if needed ─────────────────────────
-if ($Customer -and -not $TenantId) {
-    $customersFile = Join-Path $PSScriptRoot "customers.json"
-    if (-not (Test-Path $customersFile)) {
-        throw "customers.json not found at $customersFile. Pass -TenantId directly or create the file."
-    }
-    $profiles = Get-Content $customersFile -Raw | ConvertFrom-Json
-    # Note: avoid the automatic $profile variable — use a distinct name.
-    $customerProfile = $profiles | Where-Object { $_.ShortName -ieq $Customer }
-    if (-not $customerProfile) {
-        $available = ($profiles.ShortName) -join ', '
-        throw "Customer '$Customer' not found. Available: $available"
-    }
-    $TenantId = $customerProfile.TenantId
-    Write-Host "[INFO] Loaded TenantId for '$($customerProfile.DisplayName)': $TenantId" -ForegroundColor Cyan
+# ── Resolve tenant from customers.json (building block: Resolve-M365Customer) ──
+$resolver = Join-Path $PSScriptRoot 'Resolve-M365Customer.ps1'
+if (-not (Test-Path -LiteralPath $resolver)) { throw "Resolve-M365Customer.ps1 not found next to this script - copy the whole M365 folder." }
+$cust = & $resolver -Customer $Customer -TenantId $TenantId -CallerRoot $PSScriptRoot
+$TenantId = $cust.TenantId
+if ($cust.Profile) {
+    Write-Host "[INFO] Loaded TenantId for '$($cust.DisplayName)': $TenantId" -ForegroundColor Cyan
 }
 
 if (-not $TenantId) {

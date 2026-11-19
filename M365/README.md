@@ -34,17 +34,9 @@ Output is a single HTML report with charts, tables, and key metrics.
 .\Get-CustomerReport.ps1 -Customer contoso.com -OutputPath "C:\Reports" -InactiveThresholdDays 120
 ```
 
-### Get-TenantOverview.ps1
-Quick snapshot of a single M365 tenant:
-- Tenant ID and name
-- User and group counts
-- License summary
-- Device enrollment status
-
-**Usage:**
-```powershell
-.\Get-TenantOverview.ps1 -TenantId "contoso.com"
-```
+### Get-TenantOverview.ps1 (removed 2026-11-19)
+Everything it collected (tenant, domains, licenses, users, admin roles, groups,
+Conditional Access, Exchange Online) is part of `Get-CustomerReport.ps1`. Use that.
 
 ### Get-LicensedUsers.ps1
 Export detailed licensed user information with:
@@ -69,12 +61,30 @@ Audit Conditional Access deletion history and configuration changes. Useful for 
 ```
 
 ### move365user-shared.ps1
-Migrate a user's mailbox to shared status and transfer ownership in M365. Useful for offboarding scenarios.
+Offboards a user: blocks sign-in, converts the mailbox to Shared and removes the license.
+`-Reverse` restores the user. Supports `-WhatIf`.
 
 **Usage:**
 ```powershell
-.\move365user-shared.ps1 -UserUPN "user@contoso.com" -NewOwnerUPN "manager@contoso.com"
+.\move365user-shared.ps1 -UserPrincipalName "user@contoso.com" -Customer contoso -WhatIf
+.\move365user-shared.ps1 -UserPrincipalName "user@contoso.com" -Customer contoso -LicenseSkuPartNumber SPB
+.\move365user-shared.ps1 -UserPrincipalName "user@contoso.com" -Customer contoso -Reverse
 ```
+
+### Resolve-M365Customer.ps1 (building block)
+Picks the customer profile from `customers.json` and works out the effective TenantId and
+AdminUPN. Connects to nothing. Used by `Get-CustomerReport`, `move365user-shared` and
+`Get-CADeletionAudit` so the lookup rules are the same everywhere - **keep it in the same
+folder as those scripts**.
+
+```powershell
+$c = .\Resolve-M365Customer.ps1 -Customer contoso
+$c.TenantId; $c.AdminUPN; $c.Profile.PrimaryDomain
+```
+
+Rules: `-Customer` selects by ShortName; `-TenantId` may be a GUID/domain or a profile's
+ShortName / PrimaryDomain (then the profile's real TenantId is used); explicit
+`-TenantId` / `-AdminUPN` win over the profile.
 
 ### Org-wide calendar sharing (without exposing history)
 
@@ -130,6 +140,22 @@ an Exchange admin role. Localised tenants: the Calendar folder may be named in t
 [KB 4021947 — private appointments on shared calendars](https://learn.microsoft.com/troubleshoot/outlook/calendaring/outlook-or-owa-not-shows-full-details-of-private-appointments) ·
 [Purview sensitivity labels for meetings](https://learn.microsoft.com/purview/sensitivity-labels-meetings)
 
+## Report branding
+
+`Get-CustomerReport.ps1 -Branding` renders the report in a dark theme with your own
+accent colour, company name and logo. The values come from `brand.json` next to the
+script; copy `brand.sample.json` to `brand.json` and edit it:
+
+| Key | Meaning |
+|---|---|
+| `CompanyName` | Shown in the footer copyright line and as logo alt text |
+| `AccentColor` / `BackgroundColor` / `BackgroundDark` | Theme colours |
+| `LogoFile` | PNG beside the script, embedded as base64 (default `brand-logo.png`) |
+| `IconFolder` | Folder of section-icon PNGs (default `Ikoner`) |
+
+`brand.json`, the logo and the icon folder are git-ignored - brand assets stay local.
+Without `brand.json` the switch uses neutral defaults.
+
 ## Configuration
 
 ### customers.json
@@ -143,7 +169,7 @@ Create a `customers.json` file next to the scripts (or in a subfolder) to manage
     "DisplayName":       "Example Company AB",
     "AdminUPN":          "admin@example.com",
     "TenantId":          "00000000-0000-0000-0000-000000000000",
-    "DefaultLicenseSku": "O365_BUSINESS_PREMIUM"
+    "PrimaryLicenseSku": "SPB"
   }
 ]
 ```
@@ -153,7 +179,7 @@ Create a `customers.json` file next to the scripts (or in a subfolder) to manage
 - `DisplayName` — Friendly name for reports
 - `AdminUPN` — Service account UPN (used for Exchange Online auth)
 - `TenantId` — Entra ID Tenant ID or primary domain name
-- `DefaultLicenseSku` — Default license for new users (e.g., `O365_BUSINESS_PREMIUM`, `SPB`)
+- `PrimaryLicenseSku` — Main license SKU; `move365user-shared` uses it as the default license to remove/restore (e.g. `SPB`, `O365_BUSINESS_PREMIUM`). Older profiles with `DefaultLicenseSku` still work.
 
 Start with `customers.template.json` and customize for your environment.
 
@@ -239,4 +265,4 @@ These scripts are provided as-is for M365 management and reporting.
 
 ## Authors
 
-- Rosvall & Claude
+- Windows-Admin-Tools contributors

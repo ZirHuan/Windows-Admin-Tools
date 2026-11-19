@@ -38,6 +38,26 @@ $e = $null
 $e.Count   # must be 0
 ```
 
+### Building blocks - one place for each piece of logic
+
+When a piece of logic is useful on its own (a port test, a certificate check, the FSMO
+holders, the customer-profile lookup), it is a **separate script that runs alone and
+returns objects**, and the larger jobs call it - instead of each job carrying a copy.
+
+- A building block does one thing, is read-only unless its name says otherwise, has
+  comment-based help and its own version, and outputs objects (no `Write-Host` tables
+  as the only output).
+- Callers look for it **next to themselves first, then in the sibling folders of the
+  repo** (`..\AD`, `..\Network`), so the repo layout and a flat release folder both work.
+  A missing block must stop the caller with a message that names it.
+- Before writing a function inside a script, check whether a building block already
+  does it (`grep -rn 'function\|SYNOPSIS' --include=*.ps1`).
+
+Current blocks: `AD/Get-FsmoRoleHolder.ps1`, `AD/Get-PrivilegedAccountRisk.ps1`,
+`AD/Get-UnsignedLdapClient.ps1`, `Network/Test-TcpPort.ps1`,
+`Network/Get-TlsCertificate.ps1`, `Network/Invoke-NicSpeedTest.ps1`
+(+ `Network/NetProbe.Engine.ps1`, dot-sourced), `M365/Resolve-M365Customer.ps1`.
+
 ### Versioning
 
 Each script or tool is versioned independently and follows

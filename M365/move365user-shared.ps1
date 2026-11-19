@@ -95,6 +95,18 @@
       is version 2.x or later (Graph SDK v2). The -AddLicenses parameter
       expects [Microsoft.Graph.PowerShell.Models.IMicrosoftGraphAssignedLicense[]]
       — the hashtable cast @{ SkuId = $guid } is the supported shorthand.
+
+    Building block: Resolve-M365Customer.ps1 (same folder) - customers.json lookup.
+
+    Version : 1.1.0
+    Changelog:
+      1.1.0  2026-11-19  Profile lookup via Resolve-M365Customer.ps1 (-TenantId may also be
+                         a profile ShortName / PrimaryDomain). Default license now read from
+                         the profile's PrimaryLicenseSku - the field customers.template.json
+                         and Get-CustomerReport actually write - with DefaultLicenseSku still
+                         accepted. Before, a profile made from the template never supplied a
+                         default license.
+      1.0.0              First version.
 #>
 
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
@@ -126,30 +138,19 @@ param(
 # If -Customer is supplied, load the matching profile from customers.json.
 # Explicit parameters always win over profile values.
 
-$profileData = $null
-
-if ($Customer) {
-    $customersFile = Join-Path $PSScriptRoot "customers.json"
-
-    if (-not (Test-Path $customersFile)) {
-        throw "Customer profile file not found: $customersFile. Create it or pass -AdminUPN directly."
-    }
-
-    $profiles = Get-Content $customersFile -Raw -ErrorAction Stop | ConvertFrom-Json
-    $profileData = $profiles | Where-Object { $_.ShortName -ieq $Customer }
-
-    if (-not $profileData) {
-        $available = ($profiles.ShortName) -join ', '
-        throw "Customer '$Customer' not found in $customersFile. Available profiles: $available"
-    }
-
-    Write-Host "[Profile] Loaded customer: $($profileData.DisplayName)" -ForegroundColor Cyan
-}
+$resolver = Join-Path $PSScriptRoot 'Resolve-M365Customer.ps1'
+if (-not (Test-Path -LiteralPath $resolver)) { throw "Resolve-M365Customer.ps1 not found next to this script - copy the whole M365 folder." }
+$cust = & $resolver -Customer $Customer -TenantId $TenantId -AdminUPN $AdminUPN -CallerRoot $PSScriptRoot
+$profileData = $cust.Profile
+if ($profileData) { Write-Host "[Profile] Loaded customer: $($profileData.DisplayName)" -ForegroundColor Cyan }
 
 # Resolve effective values — explicit parameter wins over profile
-$EffectiveAdminUPN   = if ($AdminUPN)             { $AdminUPN }             elseif ($profileData.AdminUPN)            { $profileData.AdminUPN }            else { $null }
-$EffectiveTenantId   = if ($TenantId)             { $TenantId }             elseif ($profileData.TenantId)            { $profileData.TenantId }            else { $null }
-$EffectiveLicenseSku = if ($LicenseSkuPartNumber) { $LicenseSkuPartNumber } elseif ($profileData.DefaultLicenseSku)   { $profileData.DefaultLicenseSku }   else { $null }
+$EffectiveAdminUPN   = $cust.AdminUPN
+$EffectiveTenantId   = $cust.TenantId
+$profileSku          = if ($profileData -and $profileData.PSObject.Properties['PrimaryLicenseSku'] -and $profileData.PrimaryLicenseSku) { $profileData.PrimaryLicenseSku }
+                       elseif ($profileData -and $profileData.PSObject.Properties['DefaultLicenseSku'] -and $profileData.DefaultLicenseSku) { $profileData.DefaultLicenseSku }
+                       else { $null }
+$EffectiveLicenseSku = if ($LicenseSkuPartNumber) { $LicenseSkuPartNumber } else { $profileSku }
 
 if (-not $EffectiveAdminUPN) {
     throw "AdminUPN is required. Provide -AdminUPN or use -Customer with a profile that includes AdminUPN."
